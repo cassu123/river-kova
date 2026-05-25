@@ -1,0 +1,90 @@
+{
+  "robot_id": "kova-01",
+  "version": "1.0.0",
+  "description": "River Kova household chore robot — unit 01",
+
+  "hardware": {
+    "arm": {
+      "type": "6-dof",
+      "controller": "moveit",
+      "max_payload": 2.5,
+      "planning_group": "arm"
+    },
+    "drive": {
+      "type": "differential",
+      "max_speed": 1.2,
+      "wheel_base_m": 0.35
+    },
+    "sensors": {
+      "camera": "intel-realsense-d435",
+      "lidar": "rplidar-a1"
+    },
+    "pico_serial_port": "/dev/ttyACM0"
+  },
+
+  "safety": {
+    "human_detection_radius": 1.0,
+    "estop_enabled": true,
+    "max_collision_force": 10.0,
+    "watchdog_timeout_sec": 5.0,
+    "estop_recovery_delay_sec": 3.0
+  },
+
+  "connectivity": {
+    "api_endpoint": "https://api.riversongai.com",
+    "vpn_required": true,
+    "vpn_config_path": "/etc/wireguard/wg0.conf",
+    "api_timeout_sec": 30,
+    "telemetry_push_interval_sec": 5.0,
+    "stream_port": 8080,
+    "fastapi_port": 8000
+  },
+
+  "navigation": {
+    "map_resolution": 0.05,
+    "map_update_interval": 0.5,
+    "path_replan_interval": 1.0,
+    "base_station": {
+      "x": 0.0,
+      "y": 0.0,
+      "tolerance": 0.1
+    }
+  },
+
+  "vision": {
+    "fps": 30,
+    "width": 1280,
+    "height": 720,
+    "detection_confidence": 0.65,
+    "classification_confidence": 0.70,
+    "mediapipe_model_complexity": 1,
+    "enable_depth": true
+  },
+
+  "telemetry": {
+    "influxdb_url": "http://localhost:8086",
+    "influxdb_org": "river-kova",
+    "influxdb_bucket": "kova-telemetry",
+    "log_level": "INFO",
+    "log_dir": "/var/log/river-kova"
+  },
+
+  "fleet": {
+    "fleet_id": "home-01",
+    "assigned_rooms": ["kitchen", "living_room", "hallway"],
+    "home_timezone": "America/New_York"
+  },
+
+  "capabilities": {
+    "vacuum": true,
+    "mop": false,
+    "arm_manipulation": true,
+    "fetch": true,
+    "organize": true,
+    "wipe_surface": true,
+    "take_out_trash": true,
+    "load_dishwasher": true,
+    "unload_dishwasher": true,
+    "laundry_transfer": false
+  }
+}
