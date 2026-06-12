@@ -1,0 +1,13 @@
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+
+# Test artifacts
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Editor/OS
+.DS_Store
