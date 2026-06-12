@@ -366,6 +366,11 @@ class SimWorld:
                 "estopped": self._estopped,
                 "gripper": round(self._gripper_pos, 2),
                 "holding": self._holding.name if self._holding else None,
+                "dock": {"x": self._dock[0], "y": self._dock[1]},
+                "rooms": [
+                    {"name": r.name, "x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1}
+                    for r in self.rooms
+                ],
                 "objects": [
                     {"name": o.name, "kind": o.kind, "x": o.x, "y": o.y, "out_of_place": o.out_of_place}
                     for o in self.objects

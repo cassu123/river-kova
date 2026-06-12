@@ -122,7 +122,8 @@ class TestSimWorld:
 
     def test_snapshot_structure(self, world):
         snap = world.snapshot()
-        assert {"pose", "room", "battery_pct", "charging", "estopped", "gripper", "holding", "objects"} <= set(snap)
+        assert {"pose", "room", "battery_pct", "charging", "estopped", "gripper", "holding", "objects", "rooms", "dock"} <= set(snap)
+        assert {"name", "x0", "y0", "x1", "y1"} <= set(snap["rooms"][0])
 
 
 class TestSimPicoBridge:

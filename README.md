@@ -94,13 +94,18 @@ Every chore declares `required_capabilities`; every unit profile declares what i
 
 ## Simulation Mode — No Robot Required
 
-The full brain runs against a simulated body: differential-drive physics, draining/charging battery, a 5-room home with graspable objects.
+The full brain runs against a simulated body: differential-drive physics, draining/charging battery, a 5-room home with graspable objects. Any laptop or desktop with Python 3.11+ works — no ROS2, no camera, no hardware.
 
 ```bash
+git clone https://github.com/cassu123/river-kova.git
+cd river-kova
+pip install -r requirements-sim.txt
 KOVA_PROFILE=units/kova_sim_profile.json python3 -m core.main
 ```
 
-Watch the boot complete, the initiative engine notice out-of-place objects and queue a tidy-up on its own, and chores execute end-to-end. Ctrl-C shuts down cleanly.
+Then open **http://localhost:8000** in your browser. The dashboard shows a live top-down map of the 5-room house — the robot's position and heading, the charging dock, every object (out-of-place ones ringed in red) — plus battery, state, and safety level. From the same page you can type voice commands ("have kova feed the dogs"), queue chores in a specific room, and trigger or clear the e-stop.
+
+In the terminal, watch the boot complete, the initiative engine notice the out-of-place cup and sock and queue a tidy-up on its own, and chores execute end-to-end. Ctrl-C shuts down cleanly.
 
 ---
 
@@ -116,6 +121,7 @@ Every unit serves its own REST API on port 8000 — no server needed:
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /` | browser dashboard — live map, status, commands, e-stop |
 | `GET /status` | state, safety level, battery, active task (+ sim world state) |
 | `GET /chores` | available chores and their capability requirements |
 | `POST /tasks` | submit `{"chore_type": "VACUUM", "room": "kitchen"}` |

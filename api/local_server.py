@@ -17,6 +17,7 @@ License     : Proprietary — River Song AI (riversongai.com)
 
 Endpoints
 ---------
+GET  /                  — browser dashboard (dashboard.html)
 GET  /health            — liveness probe
 GET  /status            — robot state, safety level, battery, active task
 GET  /chores            — available chore types and their requirements
@@ -31,13 +32,17 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
+_DASHBOARD_PATH = Path(__file__).parent / "dashboard.html"
+
 try:
     import uvicorn
     from fastapi import FastAPI, HTTPException
+    from fastapi.responses import HTMLResponse
     from pydantic import BaseModel
     _FASTAPI_AVAILABLE = True
 except ImportError:
@@ -74,6 +79,12 @@ def create_app(core) -> "FastAPI":
     FastAPI
     """
     app = FastAPI(title="River Kova — Local Control", version="1.0.0")
+
+    @app.get("/", response_class=HTMLResponse)
+    def dashboard():
+        if not _DASHBOARD_PATH.exists():
+            raise HTTPException(status_code=404, detail="dashboard.html not found.")
+        return _DASHBOARD_PATH.read_text(encoding="utf-8")
 
     @app.get("/health")
     def health():
