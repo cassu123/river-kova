@@ -92,6 +92,8 @@ from navigation.room_mapper import RoomMapper
 from navigation.path_planner import PathPlanner
 from navigation.obstacle_avoid import ObstacleAvoidance
 from navigation.return_base import ReturnToBase
+from navigation.semantic_map import SemanticMap
+from navigation.explorer import PointDriver, Explorer
 
 # ── Telemetry ─────────────────────────────────────────────────────────────────
 from telemetry.logger import KovaLogger
@@ -105,7 +107,12 @@ from tasks.task_manager import TaskManager
 from tasks.task_executor import TaskExecutor
 
 # ── Autonomy & local control ──────────────────────────────────────────────────
-from autonomy.initiative_engine import InitiativeEngine, ScheduledRoutineRule, TidyUpRule
+from autonomy.initiative_engine import (
+    InitiativeEngine,
+    ScheduledRoutineRule,
+    TidyUpRule,
+    ExploreRule,
+)
 from api.local_server import LocalControlServer
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -184,6 +191,8 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         self.path_planner: Optional[PathPlanner] = None
         self.obstacle_avoidance: Optional[ObstacleAvoidance] = None
         self.return_to_base: Optional[ReturnToBase] = None
+        self.semantic_map: Optional[SemanticMap] = None
+        self.explorer: Optional[Explorer] = None
 
         self.kova_logger: Optional[KovaLogger] = None
         self.telemetry_collector: Optional[TelemetryCollector] = None
@@ -199,6 +208,7 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         self.local_api: Optional[LocalControlServer] = None
         self._last_heartbeat: float = 0.0
         self._last_initiative_tick: float = 0.0
+        self._last_perception_tick: float = 0.0
         self._executor_thread: Optional[threading.Thread] = None
 
         self._boot()
@@ -392,6 +402,32 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         )
         log.info("  ✓ ReturnToBase ready")
 
+        # Learned room recognition — the robot's own map of the home, built
+        # from what it sees rather than a preloaded floor plan.
+        self.semantic_map = SemanticMap()
+        map_path = str(Path(config.telemetry.log_dir) / "semantic_map.json")
+        if self.semantic_map.load(map_path):
+            log.info("  ✓ SemanticMap restored (%d room(s) known)",
+                     len(self.semantic_map.known_rooms()))
+        else:
+            log.info("  ✓ SemanticMap ready (home not yet learned)")
+        self._semantic_map_path = map_path
+
+        # Exploration: in simulation, pose ground truth and bounds come from
+        # the SimWorld; a real body plugs in odometry/SLAM here instead.
+        if self.sim_world is not None:
+            driver = PointDriver(
+                bridge=self.pico_bridge,
+                pose_provider=lambda: self.sim_world.pose,
+                safety_check=self._is_safe_to_move,
+            )
+            self.explorer = Explorer(
+                driver=driver,
+                bounds_provider=self.sim_world.bounds,
+                point_filter=lambda x, y: self.sim_world.room_at(x, y) is not None,
+            )
+            log.info("  ✓ Explorer ready (sim pose source)")
+
     def _init_telemetry(self) -> None:
         """Initialise logging, metrics collection, and alerting."""
         log.info("[BOOT 6/9] Initialising telemetry...")
@@ -447,6 +483,7 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             navigation=self.path_planner,
             vision=self.object_detector,
             safety_check=self._is_safe_to_move,
+            explorer=self.explorer,
         )
         log.info("  ✓ TaskExecutor ready")
 
@@ -479,6 +516,13 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
                     {"kind": o.kind, "room": self.sim_world.room_at(o.x, o.y)}
                     for o in self.sim_world.out_of_place_objects()
                 ],
+            ))
+
+        # Explore while the home is unfamiliar — recognition over routes.
+        if self.explorer is not None and self.semantic_map is not None:
+            self.initiative_engine.add_rule(ExploreRule(
+                known_room_count_provider=lambda: len(self.semantic_map.known_rooms()),
+                min_known_rooms=4,
             ))
 
         log.info("  ✓ InitiativeEngine ready (%d rule(s))", len(self.initiative_engine.rules))
@@ -541,6 +585,13 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         if self.battery_monitor:
             self.battery_monitor.poll()
 
+        # 2b. Passive room recognition — wherever the robot is, whatever it
+        # is doing, what it currently sees feeds the learned home map.
+        now = time.monotonic()
+        if self.semantic_map and now - self._last_perception_tick >= 0.5:
+            self._last_perception_tick = now
+            self._observe_surroundings()
+
         # 3. Initiative — let the robot propose its own work when idle
         if (
             self.initiative_engine
@@ -572,6 +623,18 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
                 safety_level=self.safety_level.value,
                 battery_pct=self.battery_monitor.level if self.battery_monitor else -1,
             )
+
+    def _observe_surroundings(self) -> None:
+        """
+        Feed one visual observation into the semantic map.
+
+        In simulation the SimWorld reports what the camera would see; on a
+        real body this same call will be fed by the object detector.
+        """
+        if self.sim_world is not None:
+            x, y, _ = self.sim_world.pose
+            kinds = [o.kind for o in self.sim_world.visible_objects()]
+            self.semantic_map.observe(x, y, kinds)
 
     def _dispatch_task(self, task: dict) -> None:
         """
@@ -820,6 +883,13 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         if self.task_executor:
             self.task_executor.abort_current()
         self._emergency_halt(reason="Graceful shutdown")
+
+        # Persist the learned home map so recognition survives reboots
+        if self.semantic_map:
+            try:
+                self.semantic_map.save(self._semantic_map_path)
+            except Exception as exc:
+                log.warning("SemanticMap save failed: %s", exc)
 
         # Tear down in reverse order
         for subsystem_name, subsystem in [

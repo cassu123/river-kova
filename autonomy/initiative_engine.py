@@ -183,6 +183,53 @@ class TidyUpRule(InitiativeRule):
         )]
 
 
+class ExploreRule(InitiativeRule):
+    """
+    Proposes an EXPLORE chore while the home is still unfamiliar.
+
+    The robot has no preloaded floor plan — rooms are recognised from what
+    the camera sees and accumulated into the semantic map. Until enough
+    rooms are known, this rule sends the robot out to learn the layout; if
+    the home is later rearranged and labels fade, it fires again.
+    """
+
+    name = "explore"
+    cooldown_sec = 1800.0          # Re-attempt an unfinished sweep every 30 min
+
+    def __init__(
+        self,
+        known_room_count_provider: Callable[[], int],
+        min_known_rooms: int = 3,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        known_room_count_provider : callable
+            Returns how many distinct rooms the semantic map has recognised.
+        min_known_rooms : int
+            Stop proposing exploration once this many rooms are known.
+        """
+        self._known_rooms = known_room_count_provider
+        self._min_rooms = min_known_rooms
+
+    def evaluate(self, now: datetime) -> List[TaskProposal]:
+        """Propose EXPLORE while too few rooms have been recognised."""
+        try:
+            known = self._known_rooms()
+        except Exception as exc:
+            log.warning("ExploreRule provider error: %s", exc)
+            return []
+
+        if known >= self._min_rooms:
+            return []
+
+        return [TaskProposal(
+            chore_type="EXPLORE",
+            priority=2,                # Below tidy-ups and all direct commands
+            reason=f"Home layout unfamiliar — {known}/{self._min_rooms} rooms recognised.",
+        )]
+
+
 class InitiativeEngine:
     """
     Evaluates initiative rules and submits the resulting chores.

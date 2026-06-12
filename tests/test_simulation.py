@@ -120,6 +120,34 @@ class TestSimWorld:
         assert "cup" in kinds
         assert "sock" in kinds
 
+    def test_visible_objects_blocked_by_walls(self, world):
+        # From the kitchen the robot sees kitchen fixtures, not the couch
+        # one room over — walls block sight.
+        world.teleport(3.25, 2.0)
+        kinds = {o.kind for o in world.visible_objects()}
+        assert "stove" in kinds
+        assert "fridge" in kinds
+        assert "couch" not in kinds
+        assert "bed" not in kinds
+
+    def test_visible_objects_respects_range(self, world):
+        world.teleport(3.25, 2.0)
+        assert world.visible_objects(max_distance=0.1) == []
+
+    def test_every_room_has_recognition_anchors(self, world):
+        from vision.room_classifier import RoomClassifier, UNKNOWN
+        classifier = RoomClassifier()
+        for room in world.rooms:
+            world.teleport((room.x0 + room.x1) / 2, (room.y0 + room.y1) / 2)
+            kinds = [o.kind for o in world.visible_objects()]
+            label, _ = classifier.classify(kinds)
+            assert label == room.name, f"{room.name} recognised as {label}"
+
+    def test_bounds_cover_all_rooms(self, world):
+        min_x, min_y, max_x, max_y = world.bounds()
+        assert (min_x, min_y) == (0.0, 0.0)
+        assert (max_x, max_y) == (8.0, 6.0)
+
     def test_snapshot_structure(self, world):
         snap = world.snapshot()
         assert {"pose", "room", "battery_pct", "charging", "estopped", "gripper", "holding", "objects", "rooms", "dock"} <= set(snap)

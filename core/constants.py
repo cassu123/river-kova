@@ -170,6 +170,7 @@ class ChoreType(str, Enum):
     LAUNDRY_TRANSFER = "LAUNDRY_TRANSFER"
     GET_WATER = "GET_WATER"
     FEED_DOGS = "FEED_DOGS"
+    EXPLORE = "EXPLORE"
     CUSTOM = "CUSTOM"
 
 

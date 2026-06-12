@@ -102,6 +102,15 @@ def create_app(core) -> "FastAPI":
         }
         if getattr(core, "sim_world", None):
             payload["sim"] = core.sim_world.snapshot()
+        semantic_map = getattr(core, "semantic_map", None)
+        if semantic_map is not None:
+            recognition = semantic_map.snapshot()
+            if getattr(core, "sim_world", None):
+                x, y, _ = core.sim_world.pose
+                label, confidence = semantic_map.room_at(x, y)
+                recognition["current_room"] = label
+                recognition["current_confidence"] = confidence
+            payload["recognition"] = recognition
         return payload
 
     @app.get("/chores")

@@ -241,6 +241,19 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         ],
     },
 
+    ChoreType.EXPLORE: {
+        "name": "Explore Home",
+        "description": "Sweep the home to discover and recognise rooms — no map required.",
+        "chore_type": ChoreType.EXPLORE,
+        "required_capabilities": [],     # Any mobile body can explore
+        "estimated_duration_sec": 600,
+        "steps": [
+            _step("arm_pose", {"pose": "stow"}, timeout_sec=10),
+            _step("explore_home", {}, timeout_sec=600),
+            _step("navigate_to_base", {}, timeout_sec=120),
+        ],
+    },
+
     ChoreType.FEED_DOGS: {
         "name": "Feed Dogs",
         "description": "Scoop dog food from storage and pour it into the dog bowl.",

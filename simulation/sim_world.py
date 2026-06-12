@@ -68,12 +68,27 @@ _DEFAULT_ROOMS: List[SimRoom] = [
 ]
 
 _DEFAULT_OBJECTS: List[SimObject] = [
+    # Movable items
     SimObject("cup-1", "cup", 5.2, 1.2, out_of_place=True),
     SimObject("sock-1", "sock", 6.5, 0.8, out_of_place=True),
     SimObject("trash-bag-1", "trash_bag", 4.0, 0.5),
     SimObject("water-bottle-1", "bottle", 3.2, 2.8),
     SimObject("dog-bowl-1", "dog_bowl", 1.5, 0.5, graspable=False),
     SimObject("food-scoop-1", "scoop", 1.8, 3.5),
+    # Fixtures — what room recognition anchors on (a kitchen is wherever
+    # the stove and fridge are seen, not a rectangle in a profile)
+    SimObject("stove-1", "stove", 2.3, 2.7, graspable=False),
+    SimObject("fridge-1", "fridge", 4.2, 2.7, graspable=False),
+    SimObject("dishwasher-1", "dishwasher", 3.2, 2.8, graspable=False),
+    SimObject("couch-1", "couch", 6.8, 2.2, graspable=False),
+    SimObject("tv-1", "tv", 7.7, 1.0, graspable=False),
+    SimObject("coffee-table-1", "coffee_table", 6.3, 1.2, graspable=False),
+    SimObject("bed-1", "bed", 7.2, 3.9, graspable=False),
+    SimObject("dresser-1", "dresser", 6.4, 4.2, graspable=False),
+    SimObject("toilet-1", "toilet", 1.4, 5.6, graspable=False),
+    SimObject("bathtub-1", "bathtub", 2.6, 5.6, graspable=False),
+    SimObject("coat-rack-1", "coat_rack", 0.3, 3.6, graspable=False),
+    SimObject("shoe-rack-1", "shoe_rack", 0.4, 0.4, graspable=False),
 ]
 
 
@@ -347,6 +362,46 @@ class SimWorld:
         """Objects flagged as out of place — feeds the autonomy engine."""
         with self._lock:
             return [o for o in self.objects if o.out_of_place and o is not self._holding]
+
+    def visible_objects(self, max_distance: float = 3.0) -> List[SimObject]:
+        """
+        What the robot's camera can see right now — the sim stand-in for the
+        vision pipeline's detections.
+
+        Walls block sight: only objects in the robot's current room count,
+        and only within range. Outside any room, range alone applies.
+
+        Parameters
+        ----------
+        max_distance : float
+            Camera visibility range in metres.
+
+        Returns
+        -------
+        list of SimObject
+        """
+        with self._lock:
+            self._integrate()
+            robot_room = self.room_at(self._x, self._y)
+            visible = []
+            for obj in self.objects:
+                if obj is self._holding:
+                    continue
+                if math.hypot(obj.x - self._x, obj.y - self._y) > max_distance:
+                    continue
+                if robot_room is not None and self.room_at(obj.x, obj.y) != robot_room:
+                    continue
+                visible.append(obj)
+            return visible
+
+    def bounds(self) -> Tuple[float, float, float, float]:
+        """Bounding box (min_x, min_y, max_x, max_y) over all rooms."""
+        return (
+            min(r.x0 for r in self.rooms),
+            min(r.y0 for r in self.rooms),
+            max(r.x1 for r in self.rooms),
+            max(r.y1 for r in self.rooms),
+        )
 
     def snapshot(self) -> Dict[str, Any]:
         """

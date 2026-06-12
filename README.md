@@ -111,7 +111,11 @@ In the terminal, watch the boot complete, the initiative engine notice the out-o
 
 ## Autonomy
 
-With `autonomy.enabled: true` in the profile, the initiative engine proposes its own work: scheduled routines (`"FEED_DOGS at 07:30 daily"`), tidy-ups when out-of-place objects are observed, all suppressed on low battery and always lower priority than direct commands. Rules are pluggable — a future River Song LLM rule slots in without core changes.
+With `autonomy.enabled: true` in the profile, the initiative engine proposes its own work: scheduled routines (`"FEED_DOGS at 07:30 daily"`), tidy-ups when out-of-place objects are observed, and exploration while the home is unfamiliar — all suppressed on low battery and always lower priority than direct commands. Rules are pluggable — a future River Song LLM rule slots in without core changes.
+
+## Room Recognition — No Preloaded Map
+
+The robot carries no floor plan. Rooms are **recognised from what the camera sees**: a kitchen is wherever the stove and fridge are (`vision/room_classifier.py`), and every observation accumulates into a learned semantic map (`navigation/semantic_map.py`) that is saved across reboots. Evidence decays on re-observation, so when furniture moves or a room is repurposed, the map follows. On first boot the initiative engine notices the home is unknown and dispatches an EXPLORE chore — the robot sweeps the house on its own (`navigation/explorer.py`) and labels each room as it goes. Watch it live on the dashboard: learned rooms appear as green check-marked labels.
 
 ---
 

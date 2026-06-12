@@ -104,6 +104,8 @@ License     : Proprietary — River Song AI (riversongai.com)
       <div class="row"><span class="k">State</span><span class="chip" id="state">—</span></div>
       <div class="row"><span class="k">Safety</span><span class="chip" id="safety">—</span></div>
       <div class="row"><span class="k">Room</span><span id="room">—</span></div>
+      <div class="row"><span class="k">Recognised as</span><span id="recognized">—</span></div>
+      <div class="row"><span class="k">Rooms learned</span><span id="rooms-learned">—</span></div>
       <div class="row"><span class="k">Holding</span><span id="holding">—</span></div>
       <div class="row"><span class="k">Active task</span><span id="active">—</span></div>
       <div class="row"><span class="k">Queued</span><span id="queued">—</span></div>
@@ -140,6 +142,10 @@ const OBJECT_COLORS = {
   cup: "#ffc857", sock: "#c792ea", trash_bag: "#8593a5",
   bottle: "#4cc2ff", dog_bowl: "#ff9e64", scoop: "#9ece6a",
 };
+const FIXTURE_KINDS = new Set([
+  "stove", "fridge", "dishwasher", "couch", "tv", "coffee_table",
+  "bed", "dresser", "toilet", "bathtub", "coat_rack", "shoe_rack",
+]);
 
 let trail = [];
 let roomsSeen = false;
@@ -183,6 +189,13 @@ function renderStatus(s) {
   $("room").textContent = sim.room ?? "—";
   $("holding").textContent = sim.holding ?? "—";
 
+  const rec = s.recognition || {};
+  $("recognized").textContent = rec.current_room && rec.current_room !== "unknown"
+    ? `${rec.current_room} (${Math.round((rec.current_confidence || 0) * 100)}%)`
+    : "not yet";
+  const learned = Object.keys(rec.rooms || {});
+  $("rooms-learned").textContent = learned.length ? learned.join(", ") : "none yet";
+
   const batt = s.battery_pct ?? sim.battery_pct;
   if (batt != null) {
     $("batt-pct").textContent = batt.toFixed(0) + "%" + (sim.charging ? " ⚡ charging" : "");
@@ -193,7 +206,7 @@ function renderStatus(s) {
 
 // ── Map rendering ────────────────────────────────────────────────────────────
 
-function renderMap(sim) {
+function renderMap(sim, recognition) {
   const canvas = $("map");
   if (!sim || !sim.rooms || !sim.rooms.length) {
     canvas.style.display = "none";
@@ -245,6 +258,14 @@ function renderMap(sim) {
   for (const o of sim.objects || []) {
     if (o.name === sim.holding) continue;
     const x = px(o.x), y = py(o.y);
+    if (FIXTURE_KINDS.has(o.kind)) {
+      ctx.fillStyle = "#3d4a5d";
+      ctx.fillRect(x - 5, y - 5, 10, 10);
+      ctx.fillStyle = "#5d6b80";
+      ctx.font = "9px system-ui";
+      ctx.fillText(o.kind.replace("_", " "), x + 8, y + 3);
+      continue;
+    }
     ctx.beginPath();
     ctx.arc(x, y, 5, 0, Math.PI * 2);
     ctx.fillStyle = OBJECT_COLORS[o.kind] || "#d7dee8";
@@ -259,6 +280,14 @@ function renderMap(sim) {
     ctx.fillStyle = "#8593a5";
     ctx.font = "10px system-ui";
     ctx.fillText(o.kind, x + 8, y - 6);
+  }
+
+  // Learned room labels — what the robot has recognised on its own
+  for (const [label, info] of Object.entries(recognition?.rooms || {})) {
+    const x = px(info.x), y = py(info.y);
+    ctx.fillStyle = "#41d98d";
+    ctx.font = "bold 12px system-ui";
+    ctx.fillText("✓ " + label.replace("_", " "), x - 24, y);
   }
 
   // Trail
@@ -311,7 +340,7 @@ async function poll() {
     $("conn").textContent = "live";
     $("conn").className = "chip ok";
     renderStatus(s);
-    renderMap(s.sim);
+    renderMap(s.sim, s.recognition);
     populateRooms(s.sim);
   } catch {
     $("conn").textContent = "disconnected";

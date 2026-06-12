@@ -119,10 +119,23 @@ rule-based and deliberately pluggable:
 |---|---|---|
 | `ScheduledRoutineRule` — profile routines ("feed dogs 07:30 daily") | Vision-backed `TidyUpRule` on real cameras | River Song LLM rule: proposes chores from household context, conversations, patterns |
 | `TidyUpRule` — sees out-of-place objects, queues ORGANIZE | Battery/charging strategy rules | Multi-unit fleet arbitration via River Song |
+| `ExploreRule` — home unfamiliar, queues EXPLORE to learn the layout | Frontier-based exploration on a live LiDAR map | Continuous re-mapping as the home changes |
 
 Initiative is suppressed when battery is low, when the robot isn't IDLE, or
 when safety isn't NOMINAL. Initiative tasks carry lower priority than direct
 human commands, so "get me water" always jumps the queue.
+
+## Room Recognition — Learned, Not Configured
+
+The brain never relies on a preloaded floor plan. `vision/room_classifier.py`
+infers room types from visible object classes (stove+fridge → kitchen);
+`navigation/semantic_map.py` accumulates those observations into a persistent
+grid whose labels decay and re-learn as the home changes. The control loop
+feeds it passively every 0.5 s from whatever the body is doing. In simulation
+the observations come from `SimWorld.visible_objects()` (walls block sight);
+on real hardware the identical `observe()` call is fed by the YOLO detector.
+`navigation/explorer.py` provides the closed-loop drive-to-point primitive and
+the discovery sweep, written against the `IOBridge` contract only.
 
 ## Safety Invariants (non-negotiable, body-agnostic)
 

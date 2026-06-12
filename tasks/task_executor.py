@@ -60,6 +60,7 @@ class TaskExecutor:
         navigation: PathPlanner,
         vision: ObjectDetector,
         safety_check: Optional[Callable[[], bool]] = None,
+        explorer=None,
     ) -> None:
         """
         Initialise the task executor.
@@ -80,6 +81,9 @@ class TaskExecutor:
             Object detector for detection steps.
         safety_check : callable, optional
             Returns True when motion is permitted. Checked before each step.
+        explorer : Explorer, optional
+            Exploration routine for the EXPLORE chore. None on bodies that
+            haven't wired one up — the step then succeeds as a no-op.
         """
         self._task_manager = task_manager
         self._drive = drive
@@ -88,6 +92,7 @@ class TaskExecutor:
         self._navigation = navigation
         self._vision = vision
         self._safety_check = safety_check
+        self._explorer = explorer
 
         self._executing: bool = False
         self._abort_flag: bool = False
@@ -323,6 +328,13 @@ class TaskExecutor:
         target_class = params.get("target_class")
         detections = self._vision.detect(target_class=target_class)
         return len(detections) > 0
+
+    def _action_explore_home(self, params: Dict[str, Any]) -> bool:
+        """Sweep the home so room recognition can learn the layout."""
+        if self._explorer is None:
+            log.info("TaskExecutor: explore_home — no explorer wired, skipping.")
+            return True
+        return self._explorer.explore(abort_check=lambda: self._abort_flag)
 
     def _action_scan_room(self, params: Dict[str, Any]) -> bool:
         """Rotate in place to scan the room for objects."""
