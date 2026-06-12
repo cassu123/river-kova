@@ -38,7 +38,7 @@ def bridge(world):
 class TestSimWorld:
     def test_starts_at_dock(self, world):
         x, y, theta = world.pose
-        assert (x, y, theta) == (0.0, 0.0, 0.0)
+        assert (x, y, theta) == (0.6, 0.6, 0.0)
 
     def test_starts_with_configured_battery(self, world):
         assert world.battery_pct == pytest.approx(80.0, abs=0.5)
@@ -50,8 +50,8 @@ class TestSimWorld:
         world.set_motors(0.5, 0.5)
         time.sleep(0.2)
         x, y, _ = world.pose
-        assert x > 0.05
-        assert y == pytest.approx(0.0, abs=0.01)
+        assert x > 0.65
+        assert y == pytest.approx(0.6, abs=0.01)
 
     def test_turning_changes_heading(self, world):
         world.set_motors(-0.5, 0.5)
@@ -72,7 +72,7 @@ class TestSimWorld:
         world.set_motors(1.0, 1.0)
         time.sleep(0.15)
         x, _, _ = world.pose
-        assert x == pytest.approx(0.0, abs=0.001)
+        assert x == pytest.approx(0.6, abs=0.001)
 
     def test_battery_charges_at_dock(self):
         w = SimWorld(start_battery_pct=50.0, charge_pct_per_min=60.0, time_scale=60.0)

@@ -106,6 +106,7 @@ License     : Proprietary — River Song AI (riversongai.com)
       <div class="row"><span class="k">Room</span><span id="room">—</span></div>
       <div class="row"><span class="k">Recognised as</span><span id="recognized">—</span></div>
       <div class="row"><span class="k">Rooms learned</span><span id="rooms-learned">—</span></div>
+      <div class="row"><span class="k">Floor mapped</span><span id="mapped">—</span></div>
       <div class="row"><span class="k">Holding</span><span id="holding">—</span></div>
       <div class="row"><span class="k">Active task</span><span id="active">—</span></div>
       <div class="row"><span class="k">Queued</span><span id="queued">—</span></div>
@@ -195,6 +196,7 @@ function renderStatus(s) {
     : "not yet";
   const learned = Object.keys(rec.rooms || {});
   $("rooms-learned").textContent = learned.length ? learned.join(", ") : "none yet";
+  $("mapped").textContent = s.mapping ? s.mapping.explored_m2.toFixed(1) + " m²" : "—";
 
   const batt = s.battery_pct ?? sim.battery_pct;
   if (batt != null) {
@@ -206,7 +208,7 @@ function renderStatus(s) {
 
 // ── Map rendering ────────────────────────────────────────────────────────────
 
-function renderMap(sim, recognition) {
+function renderMap(sim, recognition, mapping) {
   const canvas = $("map");
   if (!sim || !sim.rooms || !sim.rooms.length) {
     canvas.style.display = "none";
@@ -239,6 +241,33 @@ function renderMap(sim, recognition) {
     ctx.fillStyle = "#8593a5";
     ctx.font = "11px system-ui";
     ctx.fillText(r.name.replace("_", " "), px(r.x0) + 6, py(r.y1) + 14);
+  }
+
+  // Discovered structure — the robot's own LiDAR map (vacuum-style):
+  // mapped floor lightens, discovered walls draw solid
+  if (mapping && mapping.rows) {
+    const res = mapping.resolution_m, cw = res * scale + 0.5;
+    for (let j = 0; j < mapping.rows.length; j++) {
+      const row = mapping.rows[j];
+      const wy = mapping.origin_y + j * res;
+      for (let i = 0; i < row.length; i++) {
+        const c = row[i];
+        if (c === "?") continue;
+        const wx = mapping.origin_x + i * res;
+        ctx.fillStyle = c === "#" ? "#7d93b2" : "#1d2531";
+        ctx.fillRect(px(wx), py(wy + res), cw, cw);
+      }
+    }
+  }
+
+  // True walls — faint, so you can compare against what the robot mapped
+  for (const w of sim.walls || []) {
+    ctx.beginPath();
+    ctx.moveTo(px(w.x0), py(w.y0));
+    ctx.lineTo(px(w.x1), py(w.y1));
+    ctx.strokeStyle = "#36425466";
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
 
   // Dock
@@ -340,7 +369,7 @@ async function poll() {
     $("conn").textContent = "live";
     $("conn").className = "chip ok";
     renderStatus(s);
-    renderMap(s.sim, s.recognition);
+    renderMap(s.sim, s.recognition, s.mapping);
     populateRooms(s.sim);
   } catch {
     $("conn").textContent = "disconnected";

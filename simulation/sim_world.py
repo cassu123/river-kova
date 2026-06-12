@@ -29,6 +29,47 @@ log = logging.getLogger(__name__)
 _DOCK_RADIUS_M = 0.3          # Within this distance of the dock = charging
 _WHEEL_BASE_M = 0.35
 _MAX_SPEED_MS = 1.2
+_ROBOT_RADIUS_M = 0.15        # Body radius for wall collision
+
+
+@dataclass
+class SimWall:
+    """A wall segment (x0, y0) → (x1, y1) — blocks motion and LiDAR."""
+
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+
+def _ray_segment_t(
+    ax: float, ay: float, bx: float, by: float,
+    cx: float, cy: float, dx: float, dy: float,
+) -> Optional[float]:
+    """Fraction t along ray AB where it crosses segment CD, or None."""
+    rx, ry = bx - ax, by - ay
+    sx, sy = dx - cx, dy - cy
+    denom = rx * sy - ry * sx
+    if abs(denom) < 1e-12:
+        return None
+    t = ((cx - ax) * sy - (cy - ay) * sx) / denom
+    u = ((cx - ax) * ry - (cy - ay) * rx) / denom
+    if 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0:
+        return t
+    return None
+
+
+def _point_segment_distance(
+    px: float, py: float,
+    ax: float, ay: float, bx: float, by: float,
+) -> float:
+    """Shortest distance from point P to segment AB."""
+    abx, aby = bx - ax, by - ay
+    length_sq = abx * abx + aby * aby
+    if length_sq < 1e-12:
+        return math.hypot(px - ax, py - ay)
+    t = max(0.0, min(1.0, ((px - ax) * abx + (py - ay) * aby) / length_sq))
+    return math.hypot(px - (ax + t * abx), py - (ay + t * aby))
 
 
 @dataclass
@@ -92,6 +133,34 @@ _DEFAULT_OBJECTS: List[SimObject] = [
 ]
 
 
+# Walls follow the room boundaries, with doorways connecting:
+# hallway↔kitchen, kitchen↔living room, living room↔bedroom, hallway↔bathroom.
+_DEFAULT_WALLS: List[SimWall] = [
+    SimWall(0.0, 0.0, 0.0, 4.0),       # hallway west
+    SimWall(0.0, 0.0, 2.0, 0.0),       # hallway south
+    SimWall(0.0, 4.0, 1.1, 4.0),       # hallway north (door to bathroom 1.1–2.0)
+    SimWall(2.0, 0.0, 2.0, 1.8),       # hallway east lower (door to kitchen 1.8–2.6)
+    SimWall(2.0, 2.6, 2.0, 4.0),       # hallway east upper
+    SimWall(2.0, 1.0, 4.5, 1.0),       # kitchen south
+    SimWall(2.0, 3.0, 4.5, 3.0),       # kitchen north
+    SimWall(4.5, 1.0, 4.5, 1.5),       # kitchen east lower (door to living 1.5–2.3)
+    SimWall(4.5, 2.3, 4.5, 3.0),       # kitchen east upper
+    SimWall(4.5, 0.0, 4.5, 1.0),       # living west
+    SimWall(4.5, 0.0, 8.0, 0.0),       # living south
+    SimWall(8.0, 0.0, 8.0, 2.5),       # living east
+    SimWall(4.5, 2.5, 6.0, 2.5),       # living north west piece
+    SimWall(6.0, 2.5, 6.6, 2.5),       # living north (door to bedroom 6.6–7.4)
+    SimWall(7.4, 2.5, 8.0, 2.5),       # living north east piece
+    SimWall(6.0, 2.5, 6.0, 4.5),       # bedroom west
+    SimWall(6.0, 4.5, 8.0, 4.5),       # bedroom north
+    SimWall(8.0, 2.5, 8.0, 4.5),       # bedroom east
+    SimWall(1.0, 4.0, 1.0, 6.0),       # bathroom west
+    SimWall(1.0, 6.0, 3.0, 6.0),       # bathroom north
+    SimWall(3.0, 4.0, 3.0, 6.0),       # bathroom east
+    SimWall(2.0, 4.0, 3.0, 4.0),       # bathroom south east piece
+]
+
+
 class SimWorld:
     """
     Simulated household and robot body.
@@ -118,9 +187,10 @@ class SimWorld:
         drain_moving_pct_per_min: float = 1.5,
         charge_pct_per_min: float = 10.0,
         time_scale: float = 1.0,
-        dock_xy: Tuple[float, float] = (0.0, 0.0),
+        dock_xy: Tuple[float, float] = (0.6, 0.6),
         rooms: Optional[List[SimRoom]] = None,
         objects: Optional[List[SimObject]] = None,
+        walls: Optional[List[SimWall]] = None,
     ) -> None:
         """
         Initialise the simulated world.
@@ -165,6 +235,7 @@ class SimWorld:
         self._dock = dock_xy
         self.rooms: List[SimRoom] = list(rooms) if rooms is not None else list(_DEFAULT_ROOMS)
         self.objects: List[SimObject] = list(objects) if objects is not None else list(_DEFAULT_OBJECTS)
+        self.walls: List[SimWall] = list(walls) if walls is not None else list(_DEFAULT_WALLS)
 
         # Odometry
         self._enc_left: int = 0
@@ -205,8 +276,18 @@ class SimWorld:
 
         if not self._estopped and (v != 0.0 or w != 0.0):
             self._theta += w * dt
-            self._x += v * math.cos(self._theta) * dt
-            self._y += v * math.sin(self._theta) * dt
+            new_x = self._x + v * math.cos(self._theta) * dt
+            new_y = self._y + v * math.sin(self._theta) * dt
+            # Walls are solid, but contact slides rather than freezes —
+            # a body clipping a door frame keeps its parallel motion, like
+            # a real robot brushing past. Wheels spin either way, so
+            # encoders still tick.
+            if not self._wall_blocked(self._x, self._y, new_x, new_y):
+                self._x, self._y = new_x, new_y
+            elif not self._wall_blocked(self._x, self._y, new_x, self._y):
+                self._x = new_x
+            elif not self._wall_blocked(self._x, self._y, self._x, new_y):
+                self._y = new_y
             # Encoder ticks: ~1000 ticks per metre of wheel travel
             self._enc_left += int(v_left * dt * 1000)
             self._enc_right += int(v_right * dt * 1000)
@@ -219,6 +300,15 @@ class SimWorld:
             self._battery = max(0.0, self._battery - self._drain_moving * dt / 60.0)
         else:
             self._battery = max(0.0, self._battery - self._drain_idle * dt / 60.0)
+
+    def _wall_blocked(self, x0: float, y0: float, x1: float, y1: float) -> bool:
+        """True if moving from (x0,y0) to (x1,y1) would cross or touch a wall."""
+        for wall in self.walls:
+            if _ray_segment_t(x0, y0, x1, y1, wall.x0, wall.y0, wall.x1, wall.y1) is not None:
+                return True
+            if _point_segment_distance(x1, y1, wall.x0, wall.y0, wall.x1, wall.y1) < _ROBOT_RADIUS_M:
+                return True
+        return False
 
     # ── Robot body interface (called by SimPicoBridge) ────────────────────────
 
@@ -394,6 +484,48 @@ class SimWorld:
                 visible.append(obj)
             return visible
 
+    def lidar_scan(
+        self,
+        num_beams: int = 120,
+        max_range: float = 5.0,
+    ) -> List[Tuple[float, float, bool]]:
+        """
+        Simulated 2-D LiDAR sweep — the stand-in for an RPLiDAR.
+
+        Parameters
+        ----------
+        num_beams : int
+            Evenly spaced beams over the full circle.
+        max_range : float
+            Sensor range in metres.
+
+        Returns
+        -------
+        list of (float, float, bool)
+            (bearing relative to robot heading, measured range, hit) per
+            beam; range == max_range and hit == False when nothing is seen.
+        """
+        with self._lock:
+            self._integrate()
+            x, y, theta = self._x, self._y, self._theta
+
+        scan: List[Tuple[float, float, bool]] = []
+        for index in range(num_beams):
+            bearing = -math.pi + (2.0 * math.pi * index) / num_beams
+            angle = theta + bearing
+            end_x = x + max_range * math.cos(angle)
+            end_y = y + max_range * math.sin(angle)
+            nearest_t: Optional[float] = None
+            for wall in self.walls:
+                t = _ray_segment_t(x, y, end_x, end_y, wall.x0, wall.y0, wall.x1, wall.y1)
+                if t is not None and (nearest_t is None or t < nearest_t):
+                    nearest_t = t
+            if nearest_t is None:
+                scan.append((bearing, max_range, False))
+            else:
+                scan.append((bearing, round(nearest_t * max_range, 4), True))
+        return scan
+
     def bounds(self) -> Tuple[float, float, float, float]:
         """Bounding box (min_x, min_y, max_x, max_y) over all rooms."""
         return (
@@ -422,6 +554,10 @@ class SimWorld:
                 "gripper": round(self._gripper_pos, 2),
                 "holding": self._holding.name if self._holding else None,
                 "dock": {"x": self._dock[0], "y": self._dock[1]},
+                "walls": [
+                    {"x0": w.x0, "y0": w.y0, "x1": w.x1, "y1": w.y1}
+                    for w in self.walls
+                ],
                 "rooms": [
                     {"name": r.name, "x0": r.x0, "y0": r.y0, "x1": r.x1, "y1": r.y1}
                     for r in self.rooms

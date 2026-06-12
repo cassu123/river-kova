@@ -163,10 +163,10 @@ class TestPointDriver:
 
     @pytest.mark.timeout(30)
     def test_reaches_nearby_target(self, world, driver):
-        assert driver.go_to(1.5, 0.0, timeout_sec=15.0)
+        assert driver.go_to(1.5, 1.0, timeout_sec=15.0)
         x, y, _ = world.pose
         assert abs(x - 1.5) <= driver.tolerance_m + 0.05
-        assert abs(y) <= driver.tolerance_m + 0.05
+        assert abs(y - 1.0) <= driver.tolerance_m + 0.05
 
     @pytest.mark.timeout(10)
     def test_estopped_body_fails_safely(self, world, driver):

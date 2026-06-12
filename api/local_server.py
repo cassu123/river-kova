@@ -111,6 +111,9 @@ def create_app(core) -> "FastAPI":
                 recognition["current_room"] = label
                 recognition["current_confidence"] = confidence
             payload["recognition"] = recognition
+        occupancy_map = getattr(core, "occupancy_map", None)
+        if occupancy_map is not None:
+            payload["mapping"] = occupancy_map.snapshot()
         return payload
 
     @app.get("/chores")

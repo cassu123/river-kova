@@ -125,17 +125,34 @@ Initiative is suppressed when battery is low, when the robot isn't IDLE, or
 when safety isn't NOMINAL. Initiative tasks carry lower priority than direct
 human commands, so "get me water" always jumps the queue.
 
-## Room Recognition — Learned, Not Configured
+## Two Learned Maps — Structure vs Contents
 
-The brain never relies on a preloaded floor plan. `vision/room_classifier.py`
-infers room types from visible object classes (stove+fridge → kitchen);
-`navigation/semantic_map.py` accumulates those observations into a persistent
-grid whose labels decay and re-learn as the home changes. The control loop
-feeds it passively every 0.5 s from whatever the body is doing. In simulation
-the observations come from `SimWorld.visible_objects()` (walls block sight);
-on real hardware the identical `observe()` call is fed by the YOLO detector.
-`navigation/explorer.py` provides the closed-loop drive-to-point primitive and
-the discovery sweep, written against the `IOBridge` contract only.
+The brain never relies on a preloaded floor plan. It learns two maps with
+different change rates, exactly like a robot vacuum plus a memory:
+
+**Structural (slow-changing)** — `navigation/occupancy_map.py` is a LiDAR-built
+occupancy grid: cells along each beam carve FREE, hits mark OCCUPIED, so
+walls and doorways emerge as the robot drives. A* planning runs on this grid
+with body-radius inflation; unknown space is never traversed. Frontier
+detection (free cells bordering unknown) drives exploration. Persisted as
+JSON; structure changes (a wall removed, a door opened) are re-learned on
+the next scan through.
+
+**Semantic (fast-changing)** — `vision/room_classifier.py` infers room types
+from visible object classes (stove+fridge → kitchen); `navigation/semantic_map.py`
+accumulates those observations into a persistent grid whose labels decay and
+re-learn as the home changes.
+
+The control loop feeds both passively every 0.5 s from whatever the body is
+doing. In simulation the inputs come from `SimWorld.lidar_scan()` (ray casting
+against walls that also physically block motion) and `SimWorld.visible_objects()`
+(walls block sight); on real hardware the identical calls are fed by an
+RPLiDAR and the YOLO detector.
+
+**Motion** — `navigation/explorer.py` layers: `PointDriver` (closed-loop
+drive-to-point against the `IOBridge` contract) → `Navigator` (A* on the
+learned grid, replans when a leg fails) → `FrontierExplorer` (drive to the
+nearest edge of the known map until none remain).
 
 ## Safety Invariants (non-negotiable, body-agnostic)
 

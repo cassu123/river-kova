@@ -194,7 +194,7 @@ class ExploreRule(InitiativeRule):
     """
 
     name = "explore"
-    cooldown_sec = 1800.0          # Re-attempt an unfinished sweep every 30 min
+    cooldown_sec = 600.0           # Re-attempt an unfinished sweep every 10 min
 
     def __init__(
         self,

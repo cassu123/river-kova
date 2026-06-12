@@ -113,9 +113,14 @@ In the terminal, watch the boot complete, the initiative engine notice the out-o
 
 With `autonomy.enabled: true` in the profile, the initiative engine proposes its own work: scheduled routines (`"FEED_DOGS at 07:30 daily"`), tidy-ups when out-of-place objects are observed, and exploration while the home is unfamiliar — all suppressed on low battery and always lower priority than direct commands. Rules are pluggable — a future River Song LLM rule slots in without core changes.
 
-## Room Recognition — No Preloaded Map
+## Two Learned Maps — No Preloaded Floor Plan
 
-The robot carries no floor plan. Rooms are **recognised from what the camera sees**: a kitchen is wherever the stove and fridge are (`vision/room_classifier.py`), and every observation accumulates into a learned semantic map (`navigation/semantic_map.py`) that is saved across reboots. Evidence decays on re-observation, so when furniture moves or a room is repurposed, the map follows. On first boot the initiative engine notices the home is unknown and dispatches an EXPLORE chore — the robot sweeps the house on its own (`navigation/explorer.py`) and labels each room as it goes. Watch it live on the dashboard: learned rooms appear as green check-marked labels.
+The robot carries no map of your home. It builds two, the way a robot vacuum does — because **structure is stable but contents change**:
+
+1. **Structural map** (`navigation/occupancy_map.py`) — walls, doorways, and free floor learned from LiDAR as the robot drives. Driving is physically blocked by walls in simulation, so navigation has to be real: A* path planning runs on this learned grid (`navigation/explorer.py: Navigator`), routing through discovered doorways. Persisted across reboots; a removed wall or opened door is re-learned on the next pass.
+2. **Semantic map** (`navigation/semantic_map.py`) — *what room is what*, recognised from visible objects: a kitchen is wherever the stove and fridge are (`vision/room_classifier.py`). Evidence decays on re-observation, so when furniture moves or a room is repurposed, the labels follow.
+
+On first boot the initiative engine notices the home is unknown and dispatches an EXPLORE chore: **frontier exploration** drives the robot toward the edge of its own map, room by room through the doorways, until nothing is left to discover — mapping structure and recognising rooms in one pass. Watch it live on the dashboard: discovered walls fill in, mapped floor lightens, and learned rooms appear as green check-marked labels.
 
 ---
 

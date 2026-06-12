@@ -93,7 +93,8 @@ from navigation.path_planner import PathPlanner
 from navigation.obstacle_avoid import ObstacleAvoidance
 from navigation.return_base import ReturnToBase
 from navigation.semantic_map import SemanticMap
-from navigation.explorer import PointDriver, Explorer
+from navigation.occupancy_map import OccupancyMap
+from navigation.explorer import PointDriver, Navigator, FrontierExplorer
 
 # ── Telemetry ─────────────────────────────────────────────────────────────────
 from telemetry.logger import KovaLogger
@@ -192,7 +193,9 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         self.obstacle_avoidance: Optional[ObstacleAvoidance] = None
         self.return_to_base: Optional[ReturnToBase] = None
         self.semantic_map: Optional[SemanticMap] = None
-        self.explorer: Optional[Explorer] = None
+        self.occupancy_map: Optional[OccupancyMap] = None
+        self.navigator: Optional[Navigator] = None
+        self.explorer: Optional[FrontierExplorer] = None
 
         self.kova_logger: Optional[KovaLogger] = None
         self.telemetry_collector: Optional[TelemetryCollector] = None
@@ -413,20 +416,39 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             log.info("  ✓ SemanticMap ready (home not yet learned)")
         self._semantic_map_path = map_path
 
-        # Exploration: in simulation, pose ground truth and bounds come from
-        # the SimWorld; a real body plugs in odometry/SLAM here instead.
+        # Structural map — vacuum-style: walls and doorways learned from
+        # LiDAR, persisted because structure rarely changes. Contents are
+        # the semantic map's job, because contents change all the time.
+        self.occupancy_map = OccupancyMap()
+        occ_path = str(Path(config.telemetry.log_dir) / "occupancy_map.json")
+        if self.occupancy_map.load(occ_path):
+            log.info("  ✓ OccupancyMap restored (%.1f m² mapped)",
+                     self.occupancy_map.explored_area_m2())
+        else:
+            log.info("  ✓ OccupancyMap ready (structure not yet mapped)")
+        self._occupancy_map_path = occ_path
+
+        # Map-aware motion + frontier exploration: in simulation, pose and
+        # LiDAR come from the SimWorld; a real body plugs in odometry/SLAM
+        # and an RPLiDAR here instead.
         if self.sim_world is not None:
             driver = PointDriver(
                 bridge=self.pico_bridge,
                 pose_provider=lambda: self.sim_world.pose,
                 safety_check=self._is_safe_to_move,
             )
-            self.explorer = Explorer(
+            self.navigator = Navigator(
+                occupancy_map=self.occupancy_map,
                 driver=driver,
-                bounds_provider=self.sim_world.bounds,
-                point_filter=lambda x, y: self.sim_world.room_at(x, y) is not None,
+                pose_provider=lambda: self.sim_world.pose,
             )
-            log.info("  ✓ Explorer ready (sim pose source)")
+            self.explorer = FrontierExplorer(
+                navigator=self.navigator,
+                occupancy_map=self.occupancy_map,
+                pose_provider=lambda: self.sim_world.pose,
+                scan_integrator=self._integrate_lidar,
+            )
+            log.info("  ✓ Navigator + FrontierExplorer ready (sim sensors)")
 
     def _init_telemetry(self) -> None:
         """Initialise logging, metrics collection, and alerting."""
@@ -626,15 +648,25 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
 
     def _observe_surroundings(self) -> None:
         """
-        Feed one visual observation into the semantic map.
+        Feed one visual observation into the semantic map and one LiDAR
+        sweep into the structural map.
 
-        In simulation the SimWorld reports what the camera would see; on a
-        real body this same call will be fed by the object detector.
+        In simulation the SimWorld reports what the sensors would see; on
+        a real body these same calls are fed by the object detector and
+        the LiDAR driver.
         """
         if self.sim_world is not None:
             x, y, _ = self.sim_world.pose
             kinds = [o.kind for o in self.sim_world.visible_objects()]
             self.semantic_map.observe(x, y, kinds)
+            self._integrate_lidar()
+
+    def _integrate_lidar(self) -> None:
+        """Fold one LiDAR sweep into the occupancy map."""
+        if self.sim_world is None or self.occupancy_map is None:
+            return
+        x, y, theta = self.sim_world.pose
+        self.occupancy_map.integrate_scan(x, y, theta, self.sim_world.lidar_scan())
 
     def _dispatch_task(self, task: dict) -> None:
         """
@@ -884,12 +916,18 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             self.task_executor.abort_current()
         self._emergency_halt(reason="Graceful shutdown")
 
-        # Persist the learned home map so recognition survives reboots
+        # Persist the learned home maps so recognition and structure
+        # survive reboots
         if self.semantic_map:
             try:
                 self.semantic_map.save(self._semantic_map_path)
             except Exception as exc:
                 log.warning("SemanticMap save failed: %s", exc)
+        if self.occupancy_map:
+            try:
+                self.occupancy_map.save(self._occupancy_map_path)
+            except Exception as exc:
+                log.warning("OccupancyMap save failed: %s", exc)
 
         # Tear down in reverse order
         for subsystem_name, subsystem in [
