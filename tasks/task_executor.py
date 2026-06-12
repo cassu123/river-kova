@@ -340,6 +340,14 @@ class TaskExecutor:
                 return False
         return True
 
+    def _action_arm_pour_motion(self, params: Dict[str, Any]) -> bool:
+        """Tilt the held container to pour its contents (e.g. dog food scoop)."""
+        if not self._arm.move_to_named_pose("pour_ready"):
+            return False
+        if not self._arm.move_to_named_pose("pour_tilt"):
+            return False
+        return self._arm.move_to_named_pose("pour_ready")
+
     def _action_organize_loop(self, params: Dict[str, Any]) -> bool:
         """Stub for the organize loop — implemented by a higher-level planner."""
         log.info("TaskExecutor: organize_loop (stub) — max_items=%s.", params.get("max_items"))

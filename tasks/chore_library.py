@@ -31,6 +31,12 @@ log = logging.getLogger(__name__)
 #     "timeout_sec": float,   # max time for this step
 #     "retry": int,           # retry count on failure (0 = no retry)
 #   }
+#
+# CHORE SCHEMA additions:
+#   "required_capabilities": list of str — capability flags (matching the
+#   unit profile's 'capabilities' section) that the robot body must declare
+#   before this chore is accepted. This keeps the brain universal: a body
+#   without an arm simply never receives arm chores.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -77,6 +83,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Vacuum Room",
         "description": "Navigate the room in a coverage pattern and vacuum the floor.",
         "chore_type": ChoreType.VACUUM,
+        "required_capabilities": ['vacuum'],
         "estimated_duration_sec": 900,
         "steps": [
             _step("arm_pose", {"pose": "stow"}, timeout_sec=10),
@@ -89,6 +96,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Mop Floor",
         "description": "Navigate the room in a coverage pattern and mop the floor.",
         "chore_type": ChoreType.MOP,
+        "required_capabilities": ['mop'],
         "estimated_duration_sec": 1200,
         "steps": [
             _step("arm_pose", {"pose": "stow"}, timeout_sec=10),
@@ -101,6 +109,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Fetch Object",
         "description": "Locate, navigate to, grasp, and deliver a specified object.",
         "chore_type": ChoreType.FETCH,
+        "required_capabilities": ['fetch', 'arm_manipulation'],
         "estimated_duration_sec": 300,
         "steps": [
             _step("detect_object", {"target_class": None}, timeout_sec=30, retry=2),
@@ -121,6 +130,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Organize Items",
         "description": "Pick up out-of-place items and return them to designated locations.",
         "chore_type": ChoreType.ORGANIZE,
+        "required_capabilities": ['organize', 'arm_manipulation'],
         "estimated_duration_sec": 600,
         "steps": [
             _step("scan_room", {}, timeout_sec=30),
@@ -134,6 +144,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Wipe Surface",
         "description": "Navigate to a surface and wipe it with the arm-mounted tool.",
         "chore_type": ChoreType.WIPE_SURFACE,
+        "required_capabilities": ['wipe_surface', 'arm_manipulation'],
         "estimated_duration_sec": 180,
         "steps": [
             _step("navigate_to_waypoint", {"waypoint": "surface_target"}, timeout_sec=60),
@@ -148,6 +159,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Take Out Trash",
         "description": "Navigate to the bin, grasp the bag, and carry it to the collection point.",
         "chore_type": ChoreType.TAKE_OUT_TRASH,
+        "required_capabilities": ['take_out_trash', 'arm_manipulation'],
         "estimated_duration_sec": 300,
         "steps": [
             _step("navigate_to_waypoint", {"waypoint": "trash_bin"}, timeout_sec=60),
@@ -167,6 +179,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Load Dishwasher",
         "description": "Collect dirty dishes and load them into the dishwasher.",
         "chore_type": ChoreType.LOAD_DISHWASHER,
+        "required_capabilities": ['load_dishwasher', 'arm_manipulation'],
         "estimated_duration_sec": 600,
         "steps": [
             _step("scan_room", {"target_classes": ["cup", "plate", "bowl", "utensil"]}, timeout_sec=30),
@@ -180,6 +193,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Unload Dishwasher",
         "description": "Remove clean dishes from the dishwasher and place them in cupboards.",
         "chore_type": ChoreType.UNLOAD_DISHWASHER,
+        "required_capabilities": ['unload_dishwasher', 'arm_manipulation'],
         "estimated_duration_sec": 600,
         "steps": [
             _step("navigate_to_waypoint", {"waypoint": "dishwasher"}, timeout_sec=60),
@@ -193,6 +207,7 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
         "name": "Laundry Transfer",
         "description": "Transfer laundry from washer to dryer.",
         "chore_type": ChoreType.LAUNDRY_TRANSFER,
+        "required_capabilities": ['laundry_transfer', 'arm_manipulation'],
         "estimated_duration_sec": 300,
         "steps": [
             _step("navigate_to_waypoint", {"waypoint": "washer"}, timeout_sec=60),
@@ -200,6 +215,49 @@ _CHORE_DEFINITIONS: Dict[str, Dict[str, Any]] = {
             _step("transfer_laundry", {"source": "washer", "destination": "dryer"}, timeout_sec=180),
             _step("close_appliance_door", {"appliance": "washer"}, timeout_sec=10),
             _step("close_appliance_door", {"appliance": "dryer"}, timeout_sec=10),
+            _step("arm_pose", {"pose": "stow"}, timeout_sec=10),
+            _step("navigate_to_base", {}, timeout_sec=120),
+        ],
+    },
+
+    ChoreType.GET_WATER: {
+        "name": "Get Water",
+        "description": "Fetch a bottle of water from the water station and deliver it.",
+        "chore_type": ChoreType.GET_WATER,
+        "required_capabilities": ["get_water", "arm_manipulation"],
+        "estimated_duration_sec": 240,
+        "steps": [
+            _step("navigate_to_waypoint", {"waypoint": "water_station"}, timeout_sec=60),
+            _step("detect_object", {"target_class": "bottle"}, timeout_sec=20, retry=2),
+            _step("arm_pose", {"pose": "ready"}, timeout_sec=10),
+            _step("gripper_open", {}, timeout_sec=5),
+            _step("arm_grasp", {"target": "bottle", "force_n": 6.0}, timeout_sec=15, retry=1),
+            _step("arm_pose", {"pose": "carry"}, timeout_sec=10),
+            _step("navigate_to_waypoint", {"waypoint": "delivery_point"}, timeout_sec=120),
+            _step("arm_pose", {"pose": "place"}, timeout_sec=10),
+            _step("gripper_open", {}, timeout_sec=5),
+            _step("arm_pose", {"pose": "stow"}, timeout_sec=10),
+            _step("navigate_to_base", {}, timeout_sec=120),
+        ],
+    },
+
+    ChoreType.FEED_DOGS: {
+        "name": "Feed Dogs",
+        "description": "Scoop dog food from storage and pour it into the dog bowl.",
+        "chore_type": ChoreType.FEED_DOGS,
+        "required_capabilities": ["feed_dogs", "arm_manipulation"],
+        "estimated_duration_sec": 300,
+        "steps": [
+            _step("navigate_to_waypoint", {"waypoint": "dog_food_storage"}, timeout_sec=60),
+            _step("arm_pose", {"pose": "ready"}, timeout_sec=10),
+            _step("gripper_open", {}, timeout_sec=5),
+            _step("arm_grasp", {"target": "scoop", "force_n": 6.0}, timeout_sec=15, retry=2),
+            _step("arm_pose", {"pose": "carry"}, timeout_sec=10),
+            _step("navigate_to_waypoint", {"waypoint": "dog_bowl"}, timeout_sec=90),
+            _step("arm_pour_motion", {"angle_deg": 90}, timeout_sec=20, retry=1),
+            _step("navigate_to_waypoint", {"waypoint": "dog_food_storage"}, timeout_sec=90),
+            _step("arm_pose", {"pose": "place"}, timeout_sec=10),
+            _step("gripper_open", {}, timeout_sec=5),
             _step("arm_pose", {"pose": "stow"}, timeout_sec=10),
             _step("navigate_to_base", {}, timeout_sec=120),
         ],

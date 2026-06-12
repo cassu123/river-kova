@@ -168,7 +168,20 @@ class ChoreType(str, Enum):
     LOAD_DISHWASHER = "LOAD_DISHWASHER"
     UNLOAD_DISHWASHER = "UNLOAD_DISHWASHER"
     LAUNDRY_TRANSFER = "LAUNDRY_TRANSFER"
+    GET_WATER = "GET_WATER"
+    FEED_DOGS = "FEED_DOGS"
     CUSTOM = "CUSTOM"
+
+
+class HardwareBackend(str, Enum):
+    """Hardware driver backend selected in the unit profile.
+
+    The brain is hardware-agnostic: every robot body is reached through a
+    backend adapter. New robot platforms add a new backend value plus an
+    adapter module — nothing else in the system changes.
+    """
+    PICO = "pico"          # Raspberry Pi Pico serial bridge (reference build)
+    SIM = "sim"            # Fully simulated body — no hardware required
 
 
 class FaultCode(str, Enum):

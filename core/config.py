@@ -51,6 +51,7 @@ class SafetyConfig:
 class HardwareConfig:
     """Hardware capability descriptors for this unit."""
 
+    backend: str = "pico"
     arm_type: str = "6-dof"
     arm_controller: str = "moveit"
     arm_max_payload_kg: float = 2.5
@@ -65,6 +66,7 @@ class HardwareConfig:
 class ConnectivityConfig:
     """Network and API connectivity settings."""
 
+    enabled: bool = True
     river_song_api_url: str = "https://api.riversongai.com"
     api_key: str = ""
     vpn_required: bool = True
@@ -73,6 +75,27 @@ class ConnectivityConfig:
     telemetry_push_interval_sec: float = 5.0
     stream_port: int = 8080
     fastapi_port: int = 8000
+
+
+@dataclass
+class SimulationConfig:
+    """Simulated-world parameters (used when hardware.backend == 'sim')."""
+
+    start_battery_pct: float = 100.0
+    battery_drain_idle_pct_per_min: float = 0.2
+    battery_drain_moving_pct_per_min: float = 1.5
+    battery_charge_pct_per_min: float = 10.0
+    time_scale: float = 1.0
+
+
+@dataclass
+class AutonomyConfig:
+    """Initiative engine settings — self-directed task generation."""
+
+    enabled: bool = False
+    tick_interval_sec: float = 5.0
+    min_battery_pct: float = 30.0
+    routines: list = field(default_factory=list)
 
 
 @dataclass
@@ -166,6 +189,8 @@ class Config:
         self.navigation: NavigationConfig = self._build_navigation()
         self.vision: VisionConfig = self._build_vision()
         self.telemetry: TelemetryConfig = self._build_telemetry()
+        self.simulation: SimulationConfig = self._build_simulation()
+        self.autonomy: AutonomyConfig = self._build_autonomy()
 
         self._initialized = True
         logger.info("Config loaded for unit '%s' (v%s)", self.robot_id, self.version)
@@ -265,6 +290,7 @@ class Config:
         drive = h.get("drive", {})
         sensors = h.get("sensors", {})
         return HardwareConfig(
+            backend=h.get("backend", "pico"),
             arm_type=arm.get("type", "6-dof"),
             arm_controller=arm.get("controller", "moveit"),
             arm_max_payload_kg=float(arm.get("max_payload", 2.5)),
@@ -279,6 +305,7 @@ class Config:
         """Build ConnectivityConfig from raw profile data."""
         c = self._raw.get("connectivity", {})
         return ConnectivityConfig(
+            enabled=bool(c.get("enabled", True)),
             river_song_api_url=c.get("api_endpoint", "https://api.riversongai.com"),
             api_key=self._api_key,
             vpn_required=bool(c.get("vpn_required", True)),
@@ -327,7 +354,39 @@ class Config:
             log_dir=t.get("log_dir", "/var/log/river-kova"),
         )
 
+    def _build_simulation(self) -> SimulationConfig:
+        """Build SimulationConfig from raw profile data."""
+        s = self._raw.get("simulation", {})
+        return SimulationConfig(
+            start_battery_pct=float(s.get("start_battery_pct", 100.0)),
+            battery_drain_idle_pct_per_min=float(s.get("battery_drain_idle_pct_per_min", 0.2)),
+            battery_drain_moving_pct_per_min=float(s.get("battery_drain_moving_pct_per_min", 1.5)),
+            battery_charge_pct_per_min=float(s.get("battery_charge_pct_per_min", 10.0)),
+            time_scale=float(s.get("time_scale", 1.0)),
+        )
+
+    def _build_autonomy(self) -> AutonomyConfig:
+        """Build AutonomyConfig from raw profile data."""
+        a = self._raw.get("autonomy", {})
+        return AutonomyConfig(
+            enabled=bool(a.get("enabled", False)),
+            tick_interval_sec=float(a.get("tick_interval_sec", 5.0)),
+            min_battery_pct=float(a.get("min_battery_pct", 30.0)),
+            routines=list(a.get("routines", [])),
+        )
+
     # ── Convenience accessors ─────────────────────────────────────────────────
+
+    @property
+    def capability_set(self) -> Optional[set]:
+        """
+        Set of enabled capability flags from the profile, or None when the
+        profile declares no 'capabilities' section (None = allow everything).
+        """
+        caps = self._raw.get("capabilities")
+        if caps is None:
+            return None
+        return {name for name, enabled in caps.items() if enabled}
 
     @property
     def robot_id(self) -> str:

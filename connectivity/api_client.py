@@ -17,6 +17,8 @@ License     : Proprietary — River Song AI (riversongai.com)
 from __future__ import annotations
 
 import logging
+import queue
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +32,8 @@ log = logging.getLogger(__name__)
 
 _MAX_RETRIES = 3
 _BACKOFF_FACTOR = 0.5
+_ASYNC_QUEUE_SIZE = 200        # Pending fire-and-forget messages
+_ASYNC_TIMEOUT_SEC = 5         # Short timeout for background sends
 
 
 class RiverSongAPIError(Exception):
@@ -43,12 +47,22 @@ class RiverSongAPIClient:
     All Kova-specific endpoints are under /api/kova/.
     Provides automatic retry with exponential backoff and bearer token auth.
 
+    Periodic messages (heartbeat, telemetry, alerts, task status) are sent
+    from a background worker thread so they can NEVER block the main control
+    loop — a slow or unreachable server must not starve the watchdog.
+
+    When `enabled` is False the client runs fully offline: every method
+    becomes a local no-op and the robot is self-hosted only. This is the mode
+    to use until the River Song server side exists.
+
     Attributes
     ----------
     base_url : str
         Root URL of the River Song API server.
     robot_id : str
         Unit identifier sent with every request.
+    enabled : bool
+        False = offline / self-hosted mode, no network calls at all.
     """
 
     def __init__(
@@ -57,6 +71,7 @@ class RiverSongAPIClient:
         api_key: str,
         robot_id: str,
         timeout: int = DEFAULT_API_TIMEOUT,
+        enabled: bool = True,
     ) -> None:
         """
         Initialise the API client.
@@ -70,21 +85,89 @@ class RiverSongAPIClient:
         robot_id : str
             Unique unit identifier.
         timeout : int
-            Request timeout in seconds.
+            Request timeout in seconds (synchronous calls only).
+        enabled : bool
+            False disables all network traffic (offline / self-hosted mode).
         """
         self.base_url = base_url.rstrip("/")
         self.robot_id = robot_id
+        self.enabled = enabled
         self._api_key = api_key
         self._timeout = timeout
         self._session = self._build_session()
+        # Async sends never retry — the next heartbeat/telemetry push
+        # supersedes a lost one, and retries would delay shutdown.
+        self._async_session = self._build_session(retries=0)
 
-        log.info("RiverSongAPIClient initialised (base=%s, unit=%s).", base_url, robot_id)
+        # Background sender — fire-and-forget queue drained by a worker thread
+        self._send_queue: "queue.Queue[tuple]" = queue.Queue(maxsize=_ASYNC_QUEUE_SIZE)
+        self._worker_running = False
+        self._worker: Optional[threading.Thread] = None
+        if self.enabled:
+            self._start_worker()
+            log.info("RiverSongAPIClient initialised (base=%s, unit=%s).", base_url, robot_id)
+        else:
+            log.info("RiverSongAPIClient in OFFLINE mode — unit '%s' is self-hosted only.", robot_id)
+
+    # ── Background sender ─────────────────────────────────────────────────────
+
+    def _start_worker(self) -> None:
+        """Start the background send worker thread."""
+        self._worker_running = True
+        self._worker = threading.Thread(
+            target=self._worker_loop,
+            name="kova-api-sender",
+            daemon=True,
+        )
+        self._worker.start()
+
+    def _worker_loop(self) -> None:
+        """Drain the send queue, posting each message with a short timeout."""
+        while self._worker_running:
+            try:
+                path, payload = self._send_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            try:
+                self._post(path, payload, timeout=_ASYNC_TIMEOUT_SEC, session=self._async_session)
+            except RiverSongAPIError as exc:
+                log.debug("Async send to %s failed (dropped): %s", path, exc)
+
+    def _enqueue(self, path: str, payload: Dict[str, Any]) -> bool:
+        """
+        Queue a message for background delivery. Never blocks.
+
+        Drops the oldest pending message if the queue is full — losing a
+        stale heartbeat is preferable to stalling the control loop.
+        """
+        if not self.enabled:
+            return True
+        try:
+            self._send_queue.put_nowait((path, payload))
+        except queue.Full:
+            try:
+                self._send_queue.get_nowait()
+                self._send_queue.put_nowait((path, payload))
+            except (queue.Empty, queue.Full):
+                pass
+        return True
+
+    def stop(self) -> None:
+        """Stop the background sender thread."""
+        self._worker_running = False
+        if self._worker and self._worker.is_alive():
+            self._worker.join(timeout=3.0)
 
     # ── Session setup ─────────────────────────────────────────────────────────
 
-    def _build_session(self) -> requests.Session:
+    def _build_session(self, retries: int = _MAX_RETRIES) -> requests.Session:
         """
         Build a requests Session with retry logic and auth headers.
+
+        Parameters
+        ----------
+        retries : int
+            Total retry count (0 disables retries — used for async sends).
 
         Returns
         -------
@@ -92,7 +175,7 @@ class RiverSongAPIClient:
         """
         session = requests.Session()
         retry = Retry(
-            total=_MAX_RETRIES,
+            total=retries,
             backoff_factor=_BACKOFF_FACTOR,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["GET", "POST", "PUT", "PATCH"],
@@ -118,10 +201,13 @@ class RiverSongAPIClient:
         bool
             True if registration succeeded.
         """
+        if not self.enabled:
+            return True
         try:
             response = self._post(
                 "/api/kova/units/register",
                 {"robot_id": self.robot_id, "timestamp": time.time()},
+                timeout=_ASYNC_TIMEOUT_SEC,
             )
             log.info("Unit '%s' registered with River Song.", self.robot_id)
             return True
@@ -138,10 +224,13 @@ class RiverSongAPIClient:
         bool
             True if deregistration succeeded.
         """
+        if not self.enabled:
+            return True
         try:
             self._post(
                 "/api/kova/units/deregister",
                 {"robot_id": self.robot_id, "timestamp": time.time()},
+                timeout=_ASYNC_TIMEOUT_SEC,
             )
             log.info("Unit '%s' deregistered.", self.robot_id)
             return True
@@ -187,12 +276,9 @@ class RiverSongAPIClient:
         if extra:
             payload.update(extra)
 
-        try:
-            self._post("/api/kova/heartbeat", payload)
-            return True
-        except RiverSongAPIError as exc:
-            log.warning("Heartbeat failed: %s", exc)
-            return False
+        # Non-blocking: queued for the background sender so the control loop
+        # (and therefore the watchdog) can never stall on a slow network.
+        return self._enqueue("/api/kova/heartbeat", payload)
 
     # ── Task polling ──────────────────────────────────────────────────────────
 
@@ -205,6 +291,8 @@ class RiverSongAPIClient:
         list of dict
             Task descriptors. Empty list if none pending or on error.
         """
+        if not self.enabled:
+            return []
         try:
             data = self._get(f"/api/kova/units/{self.robot_id}/tasks")
             return data.get("tasks", [])
@@ -235,20 +323,15 @@ class RiverSongAPIClient:
         bool
             True if the report was acknowledged.
         """
-        try:
-            self._post(
-                f"/api/kova/tasks/{task_id}/status",
-                {
-                    "robot_id": self.robot_id,
-                    "status": status,
-                    "message": message,
-                    "timestamp": time.time(),
-                },
-            )
-            return True
-        except RiverSongAPIError as exc:
-            log.warning("Task status report failed: %s", exc)
-            return False
+        return self._enqueue(
+            f"/api/kova/tasks/{task_id}/status",
+            {
+                "robot_id": self.robot_id,
+                "status": status,
+                "message": message,
+                "timestamp": time.time(),
+            },
+        )
 
     # ── Telemetry push ────────────────────────────────────────────────────────
 
@@ -271,12 +354,7 @@ class RiverSongAPIClient:
             "timestamp": time.time(),
             "metrics": metrics,
         }
-        try:
-            self._post("/api/kova/telemetry", payload)
-            return True
-        except RiverSongAPIError as exc:
-            log.debug("Telemetry push failed: %s", exc)
-            return False
+        return self._enqueue("/api/kova/telemetry", payload)
 
     # ── Alert push ────────────────────────────────────────────────────────────
 
@@ -296,20 +374,15 @@ class RiverSongAPIClient:
         bool
             True if accepted.
         """
-        try:
-            self._post(
-                "/api/kova/alerts",
-                {
-                    "robot_id": self.robot_id,
-                    "level": level,
-                    "message": message,
-                    "timestamp": time.time(),
-                },
-            )
-            return True
-        except RiverSongAPIError as exc:
-            log.warning("Alert push failed: %s", exc)
-            return False
+        return self._enqueue(
+            "/api/kova/alerts",
+            {
+                "robot_id": self.robot_id,
+                "level": level,
+                "message": message,
+                "timestamp": time.time(),
+            },
+        )
 
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
@@ -340,7 +413,13 @@ class RiverSongAPIClient:
         except requests.RequestException as exc:
             raise RiverSongAPIError(f"GET {path} failed: {exc}") from exc
 
-    def _post(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _post(
+        self,
+        path: str,
+        payload: Dict[str, Any],
+        timeout: Optional[int] = None,
+        session: Optional[requests.Session] = None,
+    ) -> Dict[str, Any]:
         """
         Perform a POST request.
 
@@ -350,6 +429,10 @@ class RiverSongAPIClient:
             API path.
         payload : dict
             JSON body.
+        timeout : int, optional
+            Per-request timeout override (used by the background sender).
+        session : requests.Session, optional
+            Session override (the background sender uses a no-retry session).
 
         Returns
         -------
@@ -363,7 +446,7 @@ class RiverSongAPIClient:
         """
         url = self.base_url + path
         try:
-            resp = self._session.post(url, json=payload, timeout=self._timeout)
+            resp = (session or self._session).post(url, json=payload, timeout=timeout or self._timeout)
             resp.raise_for_status()
             return resp.json() if resp.content else {}
         except requests.RequestException as exc:

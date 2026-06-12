@@ -40,6 +40,9 @@ _DEFAULT_WAYPOINTS: Dict[str, Tuple[float, float]] = {
     "washer": (2.0, 4.0),
     "dryer": (2.5, 4.0),
     "surface_target": (3.0, 3.0),
+    "water_station": (3.2, 2.8),
+    "dog_bowl": (1.5, 0.5),
+    "dog_food_storage": (1.8, 3.5),
 }
 
 

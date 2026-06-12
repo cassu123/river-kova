@@ -55,6 +55,7 @@ class TaskManager:
         chore_library: ChoreLibrary,
         api_client: RiverSongAPIClient,
         robot_id: str,
+        capabilities: Optional[set] = None,
     ) -> None:
         """
         Initialise the task manager.
@@ -69,11 +70,16 @@ class TaskManager:
             Used to report task status back to River Song.
         robot_id : str
             Unique unit identifier.
+        capabilities : set, optional
+            Capability flags this robot body declares. Chores whose
+            'required_capabilities' aren't covered are rejected at submit
+            time. None means accept everything (backward compatible).
         """
         self.robot_id = robot_id
         self._queue = task_queue
         self._library = chore_library
         self._api = api_client
+        self._capabilities = capabilities
 
         self._active_task: Optional[Dict[str, Any]] = None
         self._task_history: List[Dict[str, Any]] = []
@@ -132,6 +138,20 @@ class TaskManager:
             log.error("TaskManager.submit: unknown chore type '%s'.", chore_type)
             return None
 
+        # Capability gate — this body must declare everything the chore needs
+        if self._capabilities is not None:
+            missing = [
+                cap for cap in chore.get("required_capabilities", [])
+                if cap not in self._capabilities
+            ]
+            if missing:
+                log.error(
+                    "TaskManager.submit: chore '%s' rejected — unit '%s' lacks "
+                    "capabilities %s.",
+                    chore_type, self.robot_id, missing,
+                )
+                return None
+
         task: Dict[str, Any] = {
             "id": task_id or str(uuid.uuid4()),
             "chore_type": chore_type,
@@ -179,8 +199,12 @@ class TaskManager:
         command_lower = command.lower()
         log.info("TaskManager: parsing voice command: '%s'", command)
 
-        # Simple keyword mapping — extend as needed
+        # Simple keyword mapping — order matters: more specific phrases
+        # (water, feed, dog) must match before generic verbs (get, bring).
         chore_keywords = {
+            "water": "GET_WATER",
+            "feed": "FEED_DOGS",
+            "dog": "FEED_DOGS",
             "vacuum": "VACUUM",
             "mop": "MOP",
             "clean": "VACUUM",

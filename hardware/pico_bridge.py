@@ -161,9 +161,14 @@ class PicoBridge:
         payload = json.dumps({"cmd": cmd, "params": params or {}}) + "\n"
 
         if not _SERIAL_AVAILABLE:
-            # Stub mode — return a synthetic OK response
+            # Stub mode — return a synthetic OK response with sane defaults
+            # (full battery, zero force) so safety logic doesn't trip on
+            # phantom readings.
             log.debug("PicoBridge STUB send: %s", payload.strip())
-            return {"status": "ok", "data": {}}
+            return {
+                "status": "ok",
+                "data": {"percent": 100.0, "force_n": 0.0, "left": 0, "right": 0},
+            }
 
         with self._lock:
             try:

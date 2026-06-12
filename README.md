@@ -1,12 +1,12 @@
 # River Kova
 
-**River Kova** is the household chore robot control system for the [River Song AI](https://riversongai.com) personal ecosystem. It controls a fleet of autonomous robots that clean, fetch, organise, and navigate the home — all orchestrated by River Song voice commands and scheduling.
+**River Kova** is the household chore robot control system for the [River Song AI](https://riversongai.com) personal ecosystem. It is a **universal robot brain**: buy or build any robot body later — wheeled helper, one-armed fetcher, converted vacuum — write one small adapter, and this same program runs it. Units clean, fetch, organise, and navigate the home, self-hosted on the robot and (optionally) orchestrated by River Song voice commands and scheduling.
 
 ---
 
 ## Overview
 
-River Kova runs on a **Raspberry Pi 5** as the main compute unit, with a **Raspberry Pi Pico** handling low-level I/O. The system is built on **ROS2 Humble**, uses **MoveIt2** for arm motion planning, and communicates with the River Song cloud over **WireGuard VPN + 4G LTE / WiFi**.
+The reference build runs on a **Raspberry Pi 5** with a **Raspberry Pi Pico** handling low-level I/O, built on **ROS2 Humble** with **MoveIt2** arm planning. But no piece of the brain depends on that body: hardware is reached only through the abstraction layer in `hardware/interfaces.py`, selected per-unit via `hardware.backend` in the profile. A complete **simulated body** ships in `simulation/` — the entire system boots, plans, and executes chores with zero hardware. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design and the porting guide.
 
 Human safety is the absolute top priority. The unit performs an immediate full stop if a person is detected within 1 metre, and no hardware initialises until all safety systems are live.
 
@@ -17,15 +17,19 @@ Human safety is the absolute top priority. The unit performs an immediate full s
 ```
 river-kova/
 ├── core/               # Entry point, config, constants
-├── hardware/           # Pico bridge, drive, arm, gripper, camera, battery
+├── hardware/           # HAL contracts, backend factory, Pico bridge, drive, arm, gripper, camera, battery
+├── simulation/         # Simulated body + household world (develop with zero hardware)
 ├── safety/             # EStop, watchdog, fault manager, human detection, collision avoidance
 ├── navigation/         # Room mapper (occupancy grid), A* path planner, obstacle avoidance, return-to-base
 ├── vision/             # Camera feed, YOLO object detection, classifier, MJPEG stream server
 ├── telemetry/          # Structured logger, InfluxDB collector, alert manager
-├── connectivity/       # WiFi manager, WireGuard VPN, River Song API client
-├── tasks/              # Chore library, priority task queue, task manager, task executor
-├── units/              # Per-unit JSON profile (kova_profile.json)
-└── tests/              # pytest test suites
+├── connectivity/       # WiFi manager, WireGuard VPN, offline-tolerant River Song API client
+├── tasks/              # Chore library, priority task queue, capability-gated task manager, executor
+├── autonomy/           # Initiative engine — the robot decides what needs doing
+├── api/                # Self-hosted local control REST API
+├── docs/               # Architecture & porting guide
+├── units/              # Per-unit JSON profiles (kova_profile.json, kova_sim_profile.json)
+└── tests/              # pytest test suites (incl. end-to-end simulated boot)
 ```
 
 ---
@@ -80,13 +84,49 @@ Built-in chores (all extensible at runtime):
 | `LOAD_DISHWASHER` | Collect dishes, load into dishwasher |
 | `UNLOAD_DISHWASHER` | Remove clean dishes, place in cupboards |
 | `LAUNDRY_TRANSFER` | Transfer washer → dryer |
+| `GET_WATER` | Fetch a water bottle from the water station and deliver it |
+| `FEED_DOGS` | Scoop dog food from storage and pour into the bowl |
 | `CUSTOM` | User-defined via `ChoreLibrary.register()` |
+
+Every chore declares `required_capabilities`; every unit profile declares what its body can do. The task manager rejects chores the body can't perform — so the same brain safely drives an armless vacuum or a full mobile manipulator.
+
+---
+
+## Simulation Mode — No Robot Required
+
+The full brain runs against a simulated body: differential-drive physics, draining/charging battery, a 5-room home with graspable objects.
+
+```bash
+KOVA_PROFILE=units/kova_sim_profile.json python3 -m core.main
+```
+
+Watch the boot complete, the initiative engine notice out-of-place objects and queue a tidy-up on its own, and chores execute end-to-end. Ctrl-C shuts down cleanly.
+
+---
+
+## Autonomy
+
+With `autonomy.enabled: true` in the profile, the initiative engine proposes its own work: scheduled routines (`"FEED_DOGS at 07:30 daily"`), tidy-ups when out-of-place objects are observed, all suppressed on low battery and always lower priority than direct commands. Rules are pluggable — a future River Song LLM rule slots in without core changes.
+
+---
+
+## Local Control API (self-hosted)
+
+Every unit serves its own REST API on port 8000 — no server needed:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /status` | state, safety level, battery, active task (+ sim world state) |
+| `GET /chores` | available chores and their capability requirements |
+| `POST /tasks` | submit `{"chore_type": "VACUUM", "room": "kitchen"}` |
+| `POST /voice` | natural command `{"command": "have kova feed the dogs"}` |
+| `POST /estop` / `POST /estop/clear` | software emergency stop |
 
 ---
 
 ## River Song Integration
 
-All Kova API routes are mounted under `/api/kova/` on the River Song server.
+Optional — set `connectivity.enabled: false` to run fully self-hosted. When the River Song server is live, all Kova API routes are mounted under `/api/kova/`. All robot→server traffic is fire-and-forget from a background sender, so an unreachable server can never stall the robot.
 
 | Endpoint | Purpose |
 |---|---|

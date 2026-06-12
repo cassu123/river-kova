@@ -68,6 +68,7 @@ from safety.human_detection import HumanDetection
 from safety.collision_avoid import CollisionAvoidance
 
 # ── Hardware ──────────────────────────────────────────────────────────────────
+from hardware.factory import build_hardware
 from hardware.pico_bridge import PicoBridge
 from hardware.drive_controller import DriveController
 from hardware.arm_controller import ArmController
@@ -103,6 +104,10 @@ from tasks.task_queue import TaskQueue
 from tasks.task_manager import TaskManager
 from tasks.task_executor import TaskExecutor
 
+# ── Autonomy & local control ──────────────────────────────────────────────────
+from autonomy.initiative_engine import InitiativeEngine, ScheduledRoutineRule, TidyUpRule
+from api.local_server import LocalControlServer
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LOGGING BOOTSTRAP  (before anything else touches the logger)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,6 +116,7 @@ logging.basicConfig(
     level=getattr(logging, config.telemetry.log_level, logging.INFO),
     format="%(asctime)s [%(levelname)-8s] %(name)s — %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
+    force=True,  # Import-time warnings auto-configure the root logger first
 )
 log = logging.getLogger(__name__)
 
@@ -188,6 +194,13 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         self.task_manager: Optional[TaskManager] = None
         self.task_executor: Optional[TaskExecutor] = None
 
+        self.sim_world = None                  # Populated when backend == 'sim'
+        self.initiative_engine: Optional[InitiativeEngine] = None
+        self.local_api: Optional[LocalControlServer] = None
+        self._last_heartbeat: float = 0.0
+        self._last_initiative_tick: float = 0.0
+        self._executor_thread: Optional[threading.Thread] = None
+
         self._boot()
 
     # ── Boot sequence ─────────────────────────────────────────────────────────
@@ -211,6 +224,8 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             self._init_navigation()
             self._init_telemetry()
             self._init_tasks()
+            self._init_autonomy()
+            self._init_local_api()
             self._register_signal_handlers()
         except Exception as exc:
             log.critical("Boot failed: %s — triggering e-stop.", exc, exc_info=True)
@@ -227,18 +242,20 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         Safety systems MUST be live before any hardware is powered.
         Order: EStop → Watchdog → FaultManager → HumanDetection → CollisionAvoidance.
         """
-        log.info("[BOOT 1/8] Initialising safety systems...")
+        log.info("[BOOT 1/9] Initialising safety systems...")
 
         self.estop = EStop(enabled=config.safety.estop_enabled)
         self.estop.arm()
         log.info("  ✓ EStop armed")
 
+        # Created here but started at the top of run() — boot steps can
+        # legitimately take longer than the watchdog window (e.g. slow
+        # network), and the control loop is what the watchdog supervises.
         self.watchdog = Watchdog(
             timeout_sec=config.safety.watchdog_timeout_sec,
             on_timeout=self._on_watchdog_timeout,
         )
-        self.watchdog.start()
-        log.info("  ✓ Watchdog started (timeout=%.1fs)", config.safety.watchdog_timeout_sec)
+        log.info("  ✓ Watchdog armed (timeout=%.1fs, starts with control loop)", config.safety.watchdog_timeout_sec)
 
         self.fault_manager = FaultManager(
             robot_id=self.robot_id,
@@ -263,44 +280,22 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
 
     def _init_hardware(self) -> None:
         """
-        Initialise hardware drivers in dependency order.
+        Initialise hardware drivers via the backend factory.
 
-        Pico bridge must be live before drive/arm/gripper can be commanded.
+        The factory assembles the driver set for whatever robot body the
+        profile names (real serial hardware, full simulation, or a future
+        platform adapter) — everything above this point is body-agnostic.
         """
-        log.info("[BOOT 2/8] Initialising hardware drivers...")
+        log.info("[BOOT 2/9] Initialising hardware (backend='%s')...", config.hardware.backend)
 
-        self.pico_bridge = PicoBridge(
-            port=config.hardware.pico_serial_port,
-            baud_rate=115200,
-        )
-        self.pico_bridge.connect()
-        log.info("  ✓ PicoBridge connected on %s", config.hardware.pico_serial_port)
-
-        self.drive = DriveController(
-            pico_bridge=self.pico_bridge,
-            max_speed=config.hardware.drive_max_speed,
-            drive_type=config.hardware.drive_type,
-        )
-        log.info("  ✓ DriveController ready (%s)", config.hardware.drive_type)
-
-        self.arm = ArmController(
-            arm_type=config.hardware.arm_type,
-            controller=config.hardware.arm_controller,
-            max_payload_kg=config.hardware.arm_max_payload_kg,
-        )
-        log.info("  ✓ ArmController ready (%s / %s)", config.hardware.arm_type, config.hardware.arm_controller)
-
-        self.gripper = GripperManager(arm_controller=self.arm)
-        log.info("  ✓ GripperManager ready")
-
-        self.camera_manager = CameraManager(
-            model=config.hardware.camera_model,
-            fps=config.vision.camera_fps,
-            width=config.vision.camera_width,
-            height=config.vision.camera_height,
-        )
-        self.camera_manager.open()
-        log.info("  ✓ CameraManager open (%s)", config.hardware.camera_model)
+        hw = build_hardware(config)
+        self.pico_bridge = hw.bridge
+        self.drive = hw.drive
+        self.arm = hw.arm
+        self.gripper = hw.gripper
+        self.camera_manager = hw.camera
+        self.sim_world = hw.sim_world
+        log.info("  ✓ Hardware set assembled (%s backend)", hw.backend)
 
         self.battery_monitor = BatteryMonitor(
             pico_bridge=self.pico_bridge,
@@ -314,33 +309,40 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         """
         Bring up network connectivity.
 
-        VPN is established before any API calls are attempted.
+        When `connectivity.enabled` is false in the profile, the unit runs
+        fully self-hosted: no WiFi check, no VPN, and the API client is an
+        offline no-op. VPN is established before any API calls otherwise.
         """
-        log.info("[BOOT 3/8] Initialising connectivity...")
+        log.info("[BOOT 3/9] Initialising connectivity...")
 
-        self.wifi = WiFiManager()
-        self.wifi.ensure_connected()
-        log.info("  ✓ WiFi connected")
-
-        if config.connectivity.vpn_required:
-            self.vpn = VPNManager(config_path=config.connectivity.vpn_config_path)
-            self.vpn.connect()
-            log.info("  ✓ WireGuard VPN up")
+        if not config.connectivity.enabled:
+            log.info("  — Connectivity disabled in profile: self-hosted / offline mode")
         else:
-            log.info("  — VPN disabled in profile")
+            self.wifi = WiFiManager()
+            self.wifi.ensure_connected()
+            log.info("  ✓ WiFi connected")
+
+            if config.connectivity.vpn_required:
+                self.vpn = VPNManager(config_path=config.connectivity.vpn_config_path)
+                self.vpn.connect()
+                log.info("  ✓ WireGuard VPN up")
+            else:
+                log.info("  — VPN disabled in profile")
 
         self.api_client = RiverSongAPIClient(
             base_url=config.connectivity.river_song_api_url,
             api_key=config.connectivity.api_key,
             timeout=config.connectivity.api_timeout_sec,
             robot_id=self.robot_id,
+            enabled=config.connectivity.enabled,
         )
         self.api_client.register_unit()
-        log.info("  ✓ River Song API client registered")
+        log.info("  ✓ River Song API client ready (%s)",
+                 "online" if config.connectivity.enabled else "offline")
 
     def _init_vision(self) -> None:
         """Initialise the vision pipeline."""
-        log.info("[BOOT 4/8] Initialising vision pipeline...")
+        log.info("[BOOT 4/9] Initialising vision pipeline...")
 
         self.camera_feed = CameraFeed(camera_manager=self.camera_manager)
         log.info("  ✓ CameraFeed ready")
@@ -364,7 +366,7 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
 
     def _init_navigation(self) -> None:
         """Initialise navigation and mapping subsystems."""
-        log.info("[BOOT 5/8] Initialising navigation...")
+        log.info("[BOOT 5/9] Initialising navigation...")
 
         self.room_mapper = RoomMapper(
             resolution=config.navigation.map_resolution,
@@ -392,7 +394,7 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
 
     def _init_telemetry(self) -> None:
         """Initialise logging, metrics collection, and alerting."""
-        log.info("[BOOT 6/8] Initialising telemetry...")
+        log.info("[BOOT 6/9] Initialising telemetry...")
 
         self.kova_logger = KovaLogger(
             robot_id=self.robot_id,
@@ -420,7 +422,7 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
 
     def _init_tasks(self) -> None:
         """Initialise the task execution pipeline."""
-        log.info("[BOOT 7/8] Initialising task system...")
+        log.info("[BOOT 7/9] Initialising task system...")
 
         self.chore_library = ChoreLibrary()
         log.info("  ✓ ChoreLibrary loaded (%d chores)", len(self.chore_library))
@@ -433,6 +435,7 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             chore_library=self.chore_library,
             api_client=self.api_client,
             robot_id=self.robot_id,
+            capabilities=config.capability_set,
         )
         log.info("  ✓ TaskManager ready")
 
@@ -447,6 +450,48 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         )
         log.info("  ✓ TaskExecutor ready")
 
+    def _init_autonomy(self) -> None:
+        """
+        Initialise the initiative engine (self-directed task generation).
+
+        Disabled unless the profile's `autonomy.enabled` flag is true.
+        """
+        if not config.autonomy.enabled:
+            log.info("[BOOT 8/9] Autonomy disabled in profile — command-driven only.")
+            return
+
+        log.info("[BOOT 8/9] Initialising autonomy...")
+
+        self.initiative_engine = InitiativeEngine(
+            task_manager=self.task_manager,
+            min_battery_pct=config.autonomy.min_battery_pct,
+            battery_provider=lambda: self.battery_monitor.level if self.battery_monitor else 100.0,
+        )
+
+        if config.autonomy.routines:
+            self.initiative_engine.add_rule(ScheduledRoutineRule(config.autonomy.routines))
+
+        # Out-of-place observations: SimWorld in simulation; on a real body
+        # this provider will be backed by the vision pipeline.
+        if self.sim_world is not None:
+            self.initiative_engine.add_rule(TidyUpRule(
+                observation_provider=lambda: [
+                    {"kind": o.kind, "room": self.sim_world.room_at(o.x, o.y)}
+                    for o in self.sim_world.out_of_place_objects()
+                ],
+            ))
+
+        log.info("  ✓ InitiativeEngine ready (%d rule(s))", len(self.initiative_engine.rules))
+
+    def _init_local_api(self) -> None:
+        """Start the self-hosted control API."""
+        log.info("[BOOT 9/9] Starting local control API...")
+        self.local_api = LocalControlServer(core=self, port=config.connectivity.fastapi_port)
+        if self.local_api.start():
+            log.info("  ✓ Local control API on port %d", config.connectivity.fastapi_port)
+        else:
+            log.info("  — Local control API unavailable (FastAPI not installed)")
+
     # ── Main control loop ─────────────────────────────────────────────────────
 
     def run(self) -> None:
@@ -456,7 +501,9 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         Runs until a shutdown signal is received or a fatal fault occurs.
         The watchdog is kicked every iteration to prove liveness.
         """
-        log.info("[BOOT 8/8] Entering main control loop.")
+        log.info("Entering main control loop.")
+        if self.watchdog:
+            self.watchdog.start()
         loop_hz = 10  # 10 Hz control loop
         interval = 1.0 / loop_hz
 
@@ -494,7 +541,18 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         if self.battery_monitor:
             self.battery_monitor.poll()
 
-        # 3. Task dispatch (only when safe and idle)
+        # 3. Initiative — let the robot propose its own work when idle
+        if (
+            self.initiative_engine
+            and self.state == RobotState.IDLE
+            and self.safety_level == SafetyLevel.NOMINAL
+        ):
+            now = time.monotonic()
+            if now - self._last_initiative_tick >= config.autonomy.tick_interval_sec:
+                self._last_initiative_tick = now
+                self.initiative_engine.tick()
+
+        # 4. Task dispatch (only when safe and idle)
         if (
             self.state == RobotState.IDLE
             and self.safety_level == SafetyLevel.NOMINAL
@@ -504,8 +562,11 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             if next_task:
                 self._dispatch_task(next_task)
 
-        # 4. Heartbeat to River Song
-        if self.api_client:
+        # 5. Heartbeat to River Song — throttled to the push interval and
+        # queued to a background sender, so it can never stall this loop.
+        now = time.monotonic()
+        if self.api_client and now - self._last_heartbeat >= config.connectivity.telemetry_push_interval_sec:
+            self._last_heartbeat = now
             self.api_client.heartbeat(
                 state=self.state.value,
                 safety_level=self.safety_level.value,
@@ -514,7 +575,11 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
 
     def _dispatch_task(self, task: dict) -> None:
         """
-        Hand a task to the executor and update robot state.
+        Hand a task to the executor on a worker thread.
+
+        Execution must NOT block the control loop: the loop keeps ticking
+        (safety checks, watchdog kicks, heartbeats) while the chore runs.
+        The loop's IDLE-state gate prevents double dispatch.
 
         Parameters
         ----------
@@ -523,6 +588,16 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         """
         log.info("Dispatching task: %s", task.get("name", "unknown"))
         self.state = RobotState.EXECUTING_TASK
+        self._executor_thread = threading.Thread(
+            target=self._run_task,
+            args=(task,),
+            name="kova-task-executor",
+            daemon=True,
+        )
+        self._executor_thread.start()
+
+    def _run_task(self, task: dict) -> None:
+        """Worker-thread body for a single task execution."""
         try:
             self.task_executor.execute(task)
         except Exception as exc:
@@ -530,7 +605,8 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             if self.fault_manager:
                 self.fault_manager.report(f"Task failed: {exc}")
         finally:
-            self.state = RobotState.IDLE
+            if self.state == RobotState.EXECUTING_TASK:
+                self.state = RobotState.IDLE
 
     # ── Safety helpers ────────────────────────────────────────────────────────
 
@@ -732,11 +808,22 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         self._shutdown_event.set()
         self.state = RobotState.SHUTDOWN
 
-        # Stop motion first
+        # The control loop has exited — stop its watchdog before the (slow)
+        # teardown joins below, or it will fire a spurious e-stop mid-shutdown.
+        if self.watchdog:
+            try:
+                self.watchdog.stop()
+            except Exception:
+                pass
+
+        # Abort any in-flight chore, then stop motion
+        if self.task_executor:
+            self.task_executor.abort_current()
         self._emergency_halt(reason="Graceful shutdown")
 
         # Tear down in reverse order
         for subsystem_name, subsystem in [
+            ("LocalControlServer", self.local_api),
             ("TaskExecutor", self.task_executor),
             ("TaskManager", self.task_manager),
             ("StreamServer", self.stream_server),
@@ -745,7 +832,6 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             ("CameraManager", self.camera_manager),
             ("PicoBridge", self.pico_bridge),
             ("VPN", self.vpn),
-            ("Watchdog", self.watchdog),
         ]:
             if subsystem and hasattr(subsystem, "stop"):
                 try:
@@ -757,6 +843,7 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         if self.api_client:
             try:
                 self.api_client.deregister_unit()
+                self.api_client.stop()
             except Exception:
                 pass
 

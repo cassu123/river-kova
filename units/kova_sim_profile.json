@@ -1,10 +1,10 @@
 {
-  "robot_id": "kova-01",
+  "robot_id": "kova-sim-01",
   "version": "1.0.0",
-  "description": "River Kova household chore robot — unit 01",
+  "description": "River Kova simulated unit — full brain, zero hardware",
 
   "hardware": {
-    "backend": "pico",
+    "backend": "sim",
     "arm": {
       "type": "6-dof",
       "controller": "moveit",
@@ -17,10 +17,18 @@
       "wheel_base_m": 0.35
     },
     "sensors": {
-      "camera": "intel-realsense-d435",
-      "lidar": "rplidar-a1"
+      "camera": "sim-camera",
+      "lidar": "sim-lidar"
     },
-    "pico_serial_port": "/dev/ttyACM0"
+    "pico_serial_port": "sim://world"
+  },
+
+  "simulation": {
+    "start_battery_pct": 100.0,
+    "battery_drain_idle_pct_per_min": 0.2,
+    "battery_drain_moving_pct_per_min": 1.5,
+    "battery_charge_pct_per_min": 10.0,
+    "time_scale": 1.0
   },
 
   "safety": {
@@ -32,11 +40,10 @@
   },
 
   "connectivity": {
-    "enabled": true,
+    "enabled": false,
     "api_endpoint": "https://api.riversongai.com",
-    "vpn_required": true,
-    "vpn_config_path": "/etc/wireguard/wg0.conf",
-    "api_timeout_sec": 30,
+    "vpn_required": false,
+    "api_timeout_sec": 10,
     "telemetry_push_interval_sec": 5.0,
     "stream_port": 8080,
     "fastapi_port": 8000
@@ -60,7 +67,7 @@
     "detection_confidence": 0.65,
     "classification_confidence": 0.70,
     "mediapipe_model_complexity": 1,
-    "enable_depth": true
+    "enable_depth": false
   },
 
   "telemetry": {
@@ -68,25 +75,29 @@
     "influxdb_org": "river-kova",
     "influxdb_bucket": "kova-telemetry",
     "log_level": "INFO",
-    "log_dir": "/var/log/river-kova"
-  },
-
-  "fleet": {
-    "fleet_id": "home-01",
-    "assigned_rooms": ["kitchen", "living_room", "hallway"],
-    "home_timezone": "America/New_York"
+    "log_dir": "/tmp/river-kova-sim"
   },
 
   "autonomy": {
-    "enabled": false,
+    "enabled": true,
     "tick_interval_sec": 5.0,
     "min_battery_pct": 30.0,
-    "routines": []
+    "routines": [
+      { "chore": "VACUUM", "room": "kitchen", "time": "09:00", "days": ["mon", "wed", "fri"], "priority": 4 },
+      { "chore": "FEED_DOGS", "time": "07:30", "priority": 6 },
+      { "chore": "FEED_DOGS", "time": "18:00", "priority": 6 }
+    ]
+  },
+
+  "fleet": {
+    "fleet_id": "sim-home",
+    "assigned_rooms": ["kitchen", "living_room", "hallway", "bedroom", "bathroom"],
+    "home_timezone": "America/New_York"
   },
 
   "capabilities": {
     "vacuum": true,
-    "mop": false,
+    "mop": true,
     "arm_manipulation": true,
     "fetch": true,
     "organize": true,
@@ -94,7 +105,7 @@
     "take_out_trash": true,
     "load_dishwasher": true,
     "unload_dishwasher": true,
-    "laundry_transfer": false,
+    "laundry_transfer": true,
     "get_water": true,
     "feed_dogs": true
   }
