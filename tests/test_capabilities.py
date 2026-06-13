@@ -29,10 +29,12 @@ def library():
 
 
 def make_manager(capabilities):
+    api_client = MagicMock()
+    api_client.interpret_command.return_value = None
     return TaskManager(
         task_queue=TaskQueue(max_size=10),
         chore_library=ChoreLibrary(),
-        api_client=MagicMock(),
+        api_client=api_client,
         robot_id="kova-test",
         capabilities=capabilities,
     )

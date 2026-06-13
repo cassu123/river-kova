@@ -384,6 +384,95 @@ class RiverSongAPIClient:
             },
         )
 
+    # ── LLM brain (server-side) ───────────────────────────────────────────────
+
+    def request_initiative(
+        self,
+        context: str,
+        state: Dict[str, Any],
+        catalogue: List[Dict[str, Any]],
+        timeout: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Ask the River Song server's planner which chores to start now.
+
+        The LLM lives on the server, not the robot: one credential, one bill,
+        and server-side caching/batching across the whole fleet — the unit
+        never calls an online model directly. Synchronous request/response.
+
+        IMPORTANT: this blocks on the network, so it MUST be called off the
+        control-loop thread (the initiative rule runs it on a worker).
+
+        Parameters
+        ----------
+        context : str
+            Natural-language household context.
+        state : dict
+            Structured robot state (battery, known rooms, sightings).
+        catalogue : list of dict
+            The chores this body can actually run — so the server only
+            proposes things the unit supports.
+        timeout : int, optional
+            Per-request timeout override.
+
+        Returns
+        -------
+        list of dict
+            Proposal dicts, or [] when offline or on any error.
+        """
+        if not self.enabled:
+            return []
+        try:
+            data = self._post(
+                "/api/kova/initiative",
+                {
+                    "robot_id": self.robot_id,
+                    "context": context,
+                    "state": state,
+                    "catalogue": catalogue,
+                    "timestamp": time.time(),
+                },
+                timeout=timeout or self._timeout,
+            )
+            return data.get("proposals", [])
+        except RiverSongAPIError as exc:
+            log.warning("Initiative request failed (non-fatal): %s", exc)
+            return []
+
+    def interpret_command(self, command: str) -> Optional[Dict[str, Any]]:
+        """
+        Ask the server to interpret a command the local parser couldn't match.
+
+        The robot handles common phrases locally for free; only the leftovers
+        escalate to the server's language model. Returns the parsed intent or
+        None — the robot never reaches an online model itself.
+
+        Parameters
+        ----------
+        command : str
+            The raw natural-language command.
+
+        Returns
+        -------
+        dict or None
+            ``{"chore_type": str, "room": str|None}`` on success, else None
+            (no match, offline, or error).
+        """
+        if not self.enabled:
+            return None
+        try:
+            data = self._post(
+                "/api/kova/interpret",
+                {"robot_id": self.robot_id, "command": command, "timestamp": time.time()},
+            )
+            chore_type = data.get("chore_type")
+            if not chore_type:
+                return None
+            return {"chore_type": chore_type, "room": data.get("room")}
+        except RiverSongAPIError as exc:
+            log.warning("Command interpretation failed (non-fatal): %s", exc)
+            return None
+
     # ── HTTP helpers ──────────────────────────────────────────────────────────
 
     def _get(self, path: str) -> Dict[str, Any]:

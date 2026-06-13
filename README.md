@@ -115,16 +115,17 @@ With `autonomy.enabled: true` in the profile, the initiative engine proposes its
 
 ### LLM initiative — chores from natural-language context
 
-Rules are pluggable, and the River Song LLM rule is now built in (`autonomy/initiative_engine.py: LLMInitiativeRule`). With `autonomy.llm.enabled: true`, the engine periodically asks a Claude model what the home needs, given a plain-text **household context file** anyone (eventually River Song) keeps updated — "kids are home this weekend", "guests Friday night" — plus the robot's live state (battery, known rooms, out-of-place sightings). The model proposes chores; the robot runs them.
+Rules are pluggable, and the River Song LLM rule is now built in (`autonomy/initiative_engine.py: RiverSongInitiativeRule`). With `autonomy.llm.enabled: true`, the engine periodically asks the **River Song server** what the home needs, given a plain-text **household context file** anyone (eventually River Song itself) keeps updated — "kids are home this weekend", "guests Friday night" — plus the robot's live state (battery, known rooms, out-of-place sightings). The server's planner proposes chores; the robot runs them.
 
-Two guardrails make a hallucination harmless: the model's output is **schema-constrained** to the exact chore catalogue the body supports, and every proposal still passes through the same capability gate as any other task, so an armless vacuum can never be told to load the dishwasher. It is **offline-first** like the rest of the system — if the `anthropic` SDK isn't installed, no API key is set, or the call fails, the rule degrades to a silent no-op and the robot keeps running on its scheduled and observational rules.
+**The reasoning runs on the server, not the robot.** Units don't call an online model directly, hold no API key, and incur no per-unit metered cost — the whole fleet shares one credential, one bill, and server-side caching. The robot does the cheap thing locally (keyword phrase matching for both voice and routines) and escalates only the heavier reasoning to River Song. The request is made **off the control loop** on a worker thread, so it can never stall the loop or trip the watchdog.
+
+Two guardrails make a hallucination harmless: proposals are validated against the exact chore catalogue the body supports, and every one still passes through the same capability gate as any other task, so an armless vacuum can never be told to load the dishwasher. It is **offline-tolerant** like the rest of the system — an unreachable server simply yields no proposals and the robot keeps running on its scheduled and observational rules. (Needs `connectivity.enabled: true` — there has to be a server to ask.)
 
 ```jsonc
 "autonomy": {
   "enabled": true,
   "llm": {
     "enabled": true,
-    "model": "claude-opus-4-8",          // smaller model for a cost-sensitive fleet
     "cooldown_sec": 1800.0,               // at most twice an hour
     "context_path": "/var/lib/kova/household_context.txt"
   }
@@ -132,11 +133,11 @@ Two guardrails make a hallucination harmless: the model's output is **schema-con
 ```
 
 ```bash
-pip install anthropic
-export ANTHROPIC_API_KEY="your-key"
 echo "The kids are home this weekend and the dogs keep getting fed late." \
   > /var/lib/kova/household_context.txt
 ```
+
+The robot `POST`s `{context, state, catalogue}` to `/api/kova/initiative` and the server returns `{"proposals": [...]}`. Voice commands the local parser can't match escalate the same way, to `/api/kova/interpret`. The model choice, prompt, and caching all live server-side.
 
 ## Two Learned Maps — No Preloaded Floor Plan
 
@@ -172,6 +173,8 @@ Optional — set `connectivity.enabled: false` to run fully self-hosted. When th
 |---|---|
 | `POST /api/kova/units/register` | Unit registration on boot |
 | `POST /api/kova/heartbeat` | Periodic state + battery heartbeat |
+| `POST /api/kova/initiative` | Ask the server's planner which chores to start (LLM brain) |
+| `POST /api/kova/interpret` | Interpret a voice command the local parser couldn't match |
 | `GET  /api/kova/units/{id}/tasks` | Poll for pending tasks |
 | `POST /api/kova/tasks/{id}/status` | Report task completion / failure |
 | `POST /api/kova/telemetry` | Push metrics snapshot |

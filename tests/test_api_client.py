@@ -56,6 +56,45 @@ class TestOfflineMode:
         assert offline_client.push_telemetry({"cpu": 10}) is True
         assert offline_client.push_alert("INFO", "hello") is True
 
+    def test_request_initiative_returns_empty_offline(self, offline_client):
+        assert offline_client.request_initiative("ctx", {}, []) == []
+
+    def test_interpret_command_returns_none_offline(self, offline_client):
+        assert offline_client.interpret_command("clean the den") is None
+
+
+class TestServerBrain:
+    def test_request_initiative_parses_proposals(self, online_client):
+        proposals = [{"chore_type": "VACUUM", "room": "kitchen", "priority": 4, "reason": "x"}]
+        online_client._post = lambda *a, **k: {"proposals": proposals}
+        assert online_client.request_initiative("ctx", {"battery_pct": 90}, []) == proposals
+
+    def test_request_initiative_empty_on_error(self, online_client):
+        from connectivity.api_client import RiverSongAPIError
+
+        def boom(*a, **k):
+            raise RiverSongAPIError("unreachable")
+        online_client._post = boom
+        assert online_client.request_initiative("ctx", {}, []) == []
+
+    def test_interpret_command_parses_intent(self, online_client):
+        online_client._post = lambda *a, **k: {"chore_type": "MOP", "room": "bathroom"}
+        assert online_client.interpret_command("wet-clean the loo") == {
+            "chore_type": "MOP", "room": "bathroom",
+        }
+
+    def test_interpret_command_none_when_no_match(self, online_client):
+        online_client._post = lambda *a, **k: {}
+        assert online_client.interpret_command("gibberish") is None
+
+    def test_interpret_command_none_on_error(self, online_client):
+        from connectivity.api_client import RiverSongAPIError
+
+        def boom(*a, **k):
+            raise RiverSongAPIError("unreachable")
+        online_client._post = boom
+        assert online_client.interpret_command("anything") is None
+
 
 class TestNonBlockingSender:
     def test_heartbeat_returns_immediately_with_dead_server(self, online_client):

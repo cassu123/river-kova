@@ -237,6 +237,8 @@ class TestTaskManager:
         library = ChoreLibrary()
         api_client = MagicMock()
         api_client.report_task_status.return_value = True
+        # Default: server can't interpret either — keeps local-only behaviour.
+        api_client.interpret_command.return_value = None
         return TaskManager(
             task_queue=queue,
             chore_library=library,
@@ -318,6 +320,23 @@ class TestTaskManager:
         manager, _ = self._make_manager()
         result = manager.submit_from_voice("River, do something weird")
         assert result is None
+
+    def test_submit_from_voice_escalates_unmatched_to_server(self):
+        """A command the local parser misses is sent to River Song to interpret."""
+        manager, api = self._make_manager()
+        api.interpret_command.return_value = {"chore_type": "VACUUM", "room": "office"}
+        task_id = manager.submit_from_voice("River, freshen up the study please")
+        assert task_id is not None
+        api.interpret_command.assert_called_once_with("River, freshen up the study please")
+        task = manager._queue.peek()
+        assert task["chore_type"] == "VACUUM"
+        assert task["room"] == "office"
+
+    def test_submit_from_voice_local_match_skips_server(self):
+        """A locally-matched command must NOT hit the server."""
+        manager, api = self._make_manager()
+        manager.submit_from_voice("River, vacuum the kitchen")
+        api.interpret_command.assert_not_called()
 
     def test_cancel_task_removes_from_queue(self):
         """cancel_task() should remove the task from the queue."""

@@ -100,10 +100,11 @@ class AutonomyConfig:
     tick_interval_sec: float = 5.0
     min_battery_pct: float = 30.0
     routines: list = field(default_factory=list)
-    # LLM initiative rule — proposes chores from natural-language household
-    # context. Off by default; needs `pip install anthropic` and an API key.
+    # River Song LLM initiative — proposes chores from natural-language
+    # household context. The LLM runs on the River Song server, not the robot:
+    # no API key on the unit, one credential and one bill for the fleet. Needs
+    # connectivity.enabled (there has to be a server to ask). Off by default.
     llm_enabled: bool = False
-    llm_model: str = "claude-opus-4-8"
     llm_cooldown_sec: float = 1800.0
     # Plain-text file the household keeps updated with context the robot
     # should act on ("kids home this weekend", "guests Friday night"). River
@@ -389,7 +390,6 @@ class Config:
             min_battery_pct=float(a.get("min_battery_pct", 30.0)),
             routines=list(a.get("routines", [])),
             llm_enabled=bool(llm.get("enabled", False)),
-            llm_model=str(llm.get("model", "claude-opus-4-8")),
             llm_cooldown_sec=float(llm.get("cooldown_sec", 1800.0)),
             llm_context_path=llm.get("context_path"),
         )

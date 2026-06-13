@@ -17,11 +17,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from types import SimpleNamespace
+import time
 
 from autonomy.initiative_engine import (
     InitiativeEngine,
-    LLMInitiativeRule,
+    RiverSongInitiativeRule,
     ScheduledRoutineRule,
     TaskProposal,
     TidyUpRule,
@@ -125,89 +125,108 @@ class TestTidyUpRule:
         assert rule.evaluate(MONDAY_905) == []
 
 
-def _fake_client(response_text=None, raises=None, stop_reason="end_turn"):
-    """A stand-in Anthropic client returning a canned structured response."""
-    client = MagicMock()
-    if raises is not None:
-        client.messages.create.side_effect = raises
-    else:
-        client.messages.create.return_value = SimpleNamespace(
-            stop_reason=stop_reason,
-            content=[SimpleNamespace(type="text", text=response_text or "")],
-        )
-    return client
-
-
 _CATALOG = [
     {"chore_type": "VACUUM", "description": "Vacuum a room."},
     {"chore_type": "FEED_DOGS", "description": "Feed the dogs."},
 ]
 
 
-class TestLLMInitiativeRule:
-    def test_parses_and_clamps_proposals(self):
-        client = _fake_client(
-            '{"proposals": [{"chore_type": "FEED_DOGS", "room": null, '
-            '"priority": 99, "reason": "kids said the dogs are hungry"}]}'
-        )
-        rule = LLMInitiativeRule(
+def _drain(rule, provider_calls, timeout=2.0):
+    """Run evaluate() until the async worker delivers a result.
+
+    The first call kicks off the background request and returns []. We wait
+    for the worker to finish, then evaluate() again to pick up the result.
+    """
+    first = rule.evaluate(MONDAY_905)
+    deadline = time.monotonic() + timeout
+    while rule._in_flight and time.monotonic() < deadline:
+        time.sleep(0.005)
+    second = rule.evaluate(MONDAY_905)
+    return first, second
+
+
+class TestRiverSongInitiativeRule:
+    def _rule(self, provider, **kw):
+        return RiverSongInitiativeRule(
+            proposal_provider=provider,
             chore_catalog=_CATALOG,
-            context_provider=lambda: "The kids are home and the dogs haven't eaten.",
-            client=client,
+            context_provider=kw.pop("context_provider", lambda: "ctx"),
+            **kw,
         )
-        proposals = rule.evaluate(MONDAY_905)
-        assert len(proposals) == 1
-        assert proposals[0].chore_type == "FEED_DOGS"
-        assert proposals[0].priority == 6          # clamped from 99 to the ≤6 ceiling
-        assert proposals[0].reason.startswith("LLM:")
+
+    def test_first_call_is_nonblocking_then_delivers(self):
+        calls = []
+
+        def provider(ctx, state):
+            calls.append((ctx, state))
+            return [{"chore_type": "FEED_DOGS", "room": None,
+                     "priority": 99, "reason": "dogs are hungry"}]
+
+        rule = self._rule(provider,
+                          context_provider=lambda: "kids home, dogs unfed",
+                          state_provider=lambda: {"battery_pct": 80})
+        first, second = _drain(rule, calls)
+
+        assert first == []                       # never blocks the control loop
+        assert len(second) == 1
+        assert second[0].chore_type == "FEED_DOGS"
+        assert second[0].priority == 6           # clamped from 99 to the ≤6 ceiling
+        assert second[0].reason.startswith("River Song:")
+        assert calls[0][0] == "kids home, dogs unfed"
+        assert calls[0][1] == {"battery_pct": 80}
 
     def test_drops_chores_outside_catalogue(self):
-        client = _fake_client(
-            '{"proposals": [{"chore_type": "LAUNCH_ROCKET", "room": null, '
-            '"priority": 5, "reason": "hallucinated"}]}'
-        )
-        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=client)
-        assert rule.evaluate(MONDAY_905) == []
+        rule = self._rule(lambda c, s: [{"chore_type": "LAUNCH_ROCKET", "priority": 5}])
+        _, second = _drain(rule, [])
+        assert second == []
 
-    def test_empty_proposal_list_is_fine(self):
-        rule = LLMInitiativeRule(_CATALOG, lambda: "all calm", client=_fake_client('{"proposals": []}'))
-        assert rule.evaluate(MONDAY_905) == []
+    def test_empty_proposals_fine(self):
+        rule = self._rule(lambda c, s: [])
+        _, second = _drain(rule, [])
+        assert second == []
 
-    def test_unparseable_response_is_contained(self):
-        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=_fake_client("not json"))
-        assert rule.evaluate(MONDAY_905) == []
-
-    def test_api_error_is_contained(self):
-        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=_fake_client(raises=RuntimeError("503")))
-        assert rule.evaluate(MONDAY_905) == []
-
-    def test_refusal_yields_no_proposals(self):
-        client = _fake_client('{"proposals": [{"chore_type": "VACUUM"}]}', stop_reason="refusal")
-        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=client)
-        assert rule.evaluate(MONDAY_905) == []
-
-    def test_disabled_without_sdk_or_key(self, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
-        # No injected client → must build one; with no key it disables silently.
-        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx")
-        assert rule.evaluate(MONDAY_905) == []
+    def test_provider_error_is_contained(self):
+        def boom(c, s):
+            raise RuntimeError("server 503")
+        rule = self._rule(boom)
+        _, second = _drain(rule, [])
+        assert second == []
 
     def test_context_provider_error_does_not_crash(self):
         def explode():
             raise RuntimeError("notes file locked")
-        rule = LLMInitiativeRule(_CATALOG, explode, client=_fake_client('{"proposals": []}'))
-        assert rule.evaluate(MONDAY_905) == []
+        seen = []
+        rule = self._rule(lambda c, s: seen.append(c) or [], context_provider=explode)
+        _, second = _drain(rule, [])
+        assert second == []
+        assert seen == [""]                      # falls back to empty context
 
-    def test_schema_restricts_enum_to_catalogue(self):
-        client = _fake_client('{"proposals": []}')
-        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=client)
+    def test_self_throttles_requests(self):
+        calls = []
+        rule = self._rule(lambda c, s: calls.append(1) or [], request_interval_sec=999.0)
+        _drain(rule, calls)
+        # A second evaluate well inside the interval must not fire a new request
         rule.evaluate(MONDAY_905)
-        kwargs = client.messages.create.call_args.kwargs
-        schema = kwargs["output_config"]["format"]["schema"]
-        enum = schema["properties"]["proposals"]["items"]["properties"]["chore_type"]["enum"]
-        assert set(enum) == {"VACUUM", "FEED_DOGS"}
-        assert kwargs["model"] == "claude-opus-4-8"
+        assert len(calls) == 1
+
+    def test_no_request_while_one_in_flight(self):
+        import threading
+        entered = threading.Event()
+        release = threading.Event()
+        calls = []
+
+        def slow(ctx, state):
+            calls.append(1)
+            entered.set()
+            release.wait(1.0)
+            return []
+
+        rule = self._rule(slow)
+        rule.evaluate(MONDAY_905)                # kicks off the (blocked) worker
+        assert entered.wait(1.0)                 # worker is now inside the request
+        rule.evaluate(MONDAY_905)                # in flight → must not start another
+        release.set()
+        assert len(calls) == 1
 
 
 class TestInitiativeEngine:

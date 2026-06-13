@@ -22,10 +22,8 @@ fastapi==0.111.0
 uvicorn[standard]==0.30.1
 requests==2.32.3
 urllib3==2.2.1
-
-# ── Optional: LLM initiative rule ───────────────────────────────────────────────
-# Only used when autonomy.llm.enabled is true; the rule no-ops without it.
-anthropic>=0.69.0
+# Note: the LLM initiative brain runs on the River Song server, reached over
+# the existing HTTP client — the robot needs no model SDK or API key.
 
 # ── Data / Config ─────────────────────────────────────────────────────────────
 pydantic==2.7.1

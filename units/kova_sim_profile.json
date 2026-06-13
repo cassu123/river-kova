@@ -89,7 +89,6 @@
     ],
     "llm": {
       "enabled": false,
-      "model": "claude-opus-4-8",
       "cooldown_sec": 1800.0,
       "context_path": "/tmp/river-kova-sim/household_context.txt"
     }

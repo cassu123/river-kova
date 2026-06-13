@@ -241,15 +241,26 @@ class TaskManager:
                 chore_type = ctype
                 break
 
-        if chore_type is None:
-            log.warning("TaskManager: no chore matched for voice command '%s'.", command)
-            return None
-
         room = None
         for pattern, name in _VOICE_ROOM_PATTERNS:
             if pattern.search(command_lower):
                 room = name
                 break
+
+        # Local keyword parsing handles the common phrases for free. Anything
+        # it can't match escalates to the River Song server's language model —
+        # the robot never reaches an online model itself, and an offline /
+        # self-hosted unit simply gets None back and reports no match.
+        if chore_type is None:
+            interpreted = self._api.interpret_command(command)
+            if interpreted:
+                chore_type = interpreted.get("chore_type")
+                room = interpreted.get("room") or room
+                log.info("TaskManager: River Song interpreted '%s' as %s.", command, chore_type)
+
+        if chore_type is None:
+            log.warning("TaskManager: no chore matched for voice command '%s'.", command)
+            return None
 
         return self.submit(chore_type=chore_type, room=room, priority=7)
 
