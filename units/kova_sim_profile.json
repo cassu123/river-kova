@@ -86,7 +86,13 @@
       { "chore": "VACUUM", "room": "kitchen", "time": "09:00", "days": ["mon", "wed", "fri"], "priority": 4 },
       { "chore": "FEED_DOGS", "time": "07:30", "priority": 6 },
       { "chore": "FEED_DOGS", "time": "18:00", "priority": 6 }
-    ]
+    ],
+    "llm": {
+      "enabled": false,
+      "model": "claude-opus-4-8",
+      "cooldown_sec": 1800.0,
+      "context_path": "/tmp/river-kova-sim/household_context.txt"
+    }
   },
 
   "fleet": {

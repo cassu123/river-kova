@@ -17,8 +17,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from types import SimpleNamespace
+
 from autonomy.initiative_engine import (
     InitiativeEngine,
+    LLMInitiativeRule,
     ScheduledRoutineRule,
     TaskProposal,
     TidyUpRule,
@@ -120,6 +123,91 @@ class TestTidyUpRule:
             raise RuntimeError("camera offline")
         rule = TidyUpRule(observation_provider=explode)
         assert rule.evaluate(MONDAY_905) == []
+
+
+def _fake_client(response_text=None, raises=None, stop_reason="end_turn"):
+    """A stand-in Anthropic client returning a canned structured response."""
+    client = MagicMock()
+    if raises is not None:
+        client.messages.create.side_effect = raises
+    else:
+        client.messages.create.return_value = SimpleNamespace(
+            stop_reason=stop_reason,
+            content=[SimpleNamespace(type="text", text=response_text or "")],
+        )
+    return client
+
+
+_CATALOG = [
+    {"chore_type": "VACUUM", "description": "Vacuum a room."},
+    {"chore_type": "FEED_DOGS", "description": "Feed the dogs."},
+]
+
+
+class TestLLMInitiativeRule:
+    def test_parses_and_clamps_proposals(self):
+        client = _fake_client(
+            '{"proposals": [{"chore_type": "FEED_DOGS", "room": null, '
+            '"priority": 99, "reason": "kids said the dogs are hungry"}]}'
+        )
+        rule = LLMInitiativeRule(
+            chore_catalog=_CATALOG,
+            context_provider=lambda: "The kids are home and the dogs haven't eaten.",
+            client=client,
+        )
+        proposals = rule.evaluate(MONDAY_905)
+        assert len(proposals) == 1
+        assert proposals[0].chore_type == "FEED_DOGS"
+        assert proposals[0].priority == 6          # clamped from 99 to the ≤6 ceiling
+        assert proposals[0].reason.startswith("LLM:")
+
+    def test_drops_chores_outside_catalogue(self):
+        client = _fake_client(
+            '{"proposals": [{"chore_type": "LAUNCH_ROCKET", "room": null, '
+            '"priority": 5, "reason": "hallucinated"}]}'
+        )
+        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=client)
+        assert rule.evaluate(MONDAY_905) == []
+
+    def test_empty_proposal_list_is_fine(self):
+        rule = LLMInitiativeRule(_CATALOG, lambda: "all calm", client=_fake_client('{"proposals": []}'))
+        assert rule.evaluate(MONDAY_905) == []
+
+    def test_unparseable_response_is_contained(self):
+        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=_fake_client("not json"))
+        assert rule.evaluate(MONDAY_905) == []
+
+    def test_api_error_is_contained(self):
+        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=_fake_client(raises=RuntimeError("503")))
+        assert rule.evaluate(MONDAY_905) == []
+
+    def test_refusal_yields_no_proposals(self):
+        client = _fake_client('{"proposals": [{"chore_type": "VACUUM"}]}', stop_reason="refusal")
+        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=client)
+        assert rule.evaluate(MONDAY_905) == []
+
+    def test_disabled_without_sdk_or_key(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+        # No injected client → must build one; with no key it disables silently.
+        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx")
+        assert rule.evaluate(MONDAY_905) == []
+
+    def test_context_provider_error_does_not_crash(self):
+        def explode():
+            raise RuntimeError("notes file locked")
+        rule = LLMInitiativeRule(_CATALOG, explode, client=_fake_client('{"proposals": []}'))
+        assert rule.evaluate(MONDAY_905) == []
+
+    def test_schema_restricts_enum_to_catalogue(self):
+        client = _fake_client('{"proposals": []}')
+        rule = LLMInitiativeRule(_CATALOG, lambda: "ctx", client=client)
+        rule.evaluate(MONDAY_905)
+        kwargs = client.messages.create.call_args.kwargs
+        schema = kwargs["output_config"]["format"]["schema"]
+        enum = schema["properties"]["proposals"]["items"]["properties"]["chore_type"]["enum"]
+        assert set(enum) == {"VACUUM", "FEED_DOGS"}
+        assert kwargs["model"] == "claude-opus-4-8"
 
 
 class TestInitiativeEngine:

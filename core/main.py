@@ -114,6 +114,7 @@ from autonomy.initiative_engine import (
     ScheduledRoutineRule,
     TidyUpRule,
     ExploreRule,
+    LLMInitiativeRule,
 )
 from api.local_server import LocalControlServer
 
@@ -588,7 +589,53 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
                 min_known_rooms=4,
             ))
 
+        # The LLM brain — proposes chores from natural-language household
+        # context. The slot River Song's planner plugs into; disabled unless
+        # the profile opts in and the anthropic SDK + an API key are present.
+        if config.autonomy.llm_enabled:
+            self.initiative_engine.add_rule(LLMInitiativeRule(
+                chore_catalog=[
+                    {
+                        "chore_type": str(ct),
+                        "description": self.chore_library.get(ct).get("description", ""),
+                    }
+                    for ct in self.chore_library.list_chores()
+                ],
+                context_provider=self._household_context,
+                state_provider=self._llm_state_snapshot,
+                model=config.autonomy.llm_model,
+                cooldown_sec=config.autonomy.llm_cooldown_sec,
+            ))
+
         log.info("  ✓ InitiativeEngine ready (%d rule(s))", len(self.initiative_engine.rules))
+
+    def _household_context(self) -> str:
+        """Read the natural-language household context file, if configured."""
+        path = config.autonomy.llm_context_path
+        if not path:
+            return ""
+        try:
+            return Path(path).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ""
+        except Exception as exc:
+            log.warning("Household context read failed: %s", exc)
+            return ""
+
+    def _llm_state_snapshot(self) -> dict:
+        """Structured state handed to the LLM initiative rule."""
+        snapshot: dict = {
+            "battery_pct": self.battery_monitor.level if self.battery_monitor else None,
+            "state": self.state.value,
+        }
+        if self.semantic_map is not None:
+            snapshot["known_rooms"] = self.semantic_map.known_rooms()
+        if self.sim_world is not None:
+            snapshot["out_of_place_items"] = [
+                {"kind": o.kind, "room": self.sim_world.room_at(o.x, o.y)}
+                for o in self.sim_world.out_of_place_objects()
+            ]
+        return snapshot
 
     def _init_local_api(self) -> None:
         """Start the self-hosted control API."""

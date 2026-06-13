@@ -111,7 +111,32 @@ In the terminal, watch the boot complete, the initiative engine notice the out-o
 
 ## Autonomy
 
-With `autonomy.enabled: true` in the profile, the initiative engine proposes its own work: scheduled routines (`"FEED_DOGS at 07:30 daily"`), tidy-ups when out-of-place objects are observed, and exploration while the home is unfamiliar — all suppressed on low battery and always lower priority than direct commands. Rules are pluggable — a future River Song LLM rule slots in without core changes.
+With `autonomy.enabled: true` in the profile, the initiative engine proposes its own work: scheduled routines (`"FEED_DOGS at 07:30 daily"`), tidy-ups when out-of-place objects are observed, and exploration while the home is unfamiliar — all suppressed on low battery and always lower priority than direct commands. Scheduled routines persist their last-fired date, so a reboot never repeats a routine that already ran today.
+
+### LLM initiative — chores from natural-language context
+
+Rules are pluggable, and the River Song LLM rule is now built in (`autonomy/initiative_engine.py: LLMInitiativeRule`). With `autonomy.llm.enabled: true`, the engine periodically asks a Claude model what the home needs, given a plain-text **household context file** anyone (eventually River Song) keeps updated — "kids are home this weekend", "guests Friday night" — plus the robot's live state (battery, known rooms, out-of-place sightings). The model proposes chores; the robot runs them.
+
+Two guardrails make a hallucination harmless: the model's output is **schema-constrained** to the exact chore catalogue the body supports, and every proposal still passes through the same capability gate as any other task, so an armless vacuum can never be told to load the dishwasher. It is **offline-first** like the rest of the system — if the `anthropic` SDK isn't installed, no API key is set, or the call fails, the rule degrades to a silent no-op and the robot keeps running on its scheduled and observational rules.
+
+```jsonc
+"autonomy": {
+  "enabled": true,
+  "llm": {
+    "enabled": true,
+    "model": "claude-opus-4-8",          // smaller model for a cost-sensitive fleet
+    "cooldown_sec": 1800.0,               // at most twice an hour
+    "context_path": "/var/lib/kova/household_context.txt"
+  }
+}
+```
+
+```bash
+pip install anthropic
+export ANTHROPIC_API_KEY="your-key"
+echo "The kids are home this weekend and the dogs keep getting fed late." \
+  > /var/lib/kova/household_context.txt
+```
 
 ## Two Learned Maps — No Preloaded Floor Plan
 

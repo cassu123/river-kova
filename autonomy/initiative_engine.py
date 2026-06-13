@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -262,6 +263,221 @@ class ExploreRule(InitiativeRule):
             priority=2,                # Below tidy-ups and all direct commands
             reason=f"Home layout unfamiliar — {known}/{self._min_rooms} rooms recognised.",
         )]
+
+
+class LLMInitiativeRule(InitiativeRule):
+    """
+    Proposes chores by asking a Claude model to reason over natural-language
+    household context plus the robot's current state.
+
+    This is the slot the README promises: "a future River Song LLM rule slots
+    in without core changes." It implements the same ``InitiativeRule``
+    contract as the hand-written rules, so the engine treats it identically —
+    cooldown, battery suppression, capability gating on submit.
+
+    The model is constrained two ways so a hallucination can never drive the
+    robot: structured outputs restrict ``chore_type`` to the exact catalogue
+    passed in, and every proposal still passes through ``TaskManager.submit``,
+    which independently rejects unknown chores and ones the body can't perform.
+
+    Degrades to a silent no-op — never raising, never blocking — when the
+    ``anthropic`` SDK isn't installed, no API key is set, or the call fails.
+    The robot stays fully functional offline; this rule simply proposes
+    nothing until the brain is reachable again.
+    """
+
+    name = "llm_initiative"
+    cooldown_sec = 1800.0          # LLM calls cost tokens — at most twice an hour
+
+    def __init__(
+        self,
+        chore_catalog: List[Dict[str, Any]],
+        context_provider: Callable[[], str],
+        state_provider: Optional[Callable[[], Dict[str, Any]]] = None,
+        model: str = "claude-opus-4-8",
+        cooldown_sec: float = 1800.0,
+        max_proposals: int = 3,
+        client: Optional[Any] = None,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        chore_catalog : list of dict
+            The chores the robot can actually run, each
+            ``{"chore_type": str, "description": str}``. The model may only
+            propose from this set (enforced by the output schema).
+        context_provider : callable
+            Returns the current natural-language household context (e.g. the
+            contents of a notes file River Song keeps updated). Empty string
+            is fine — the model then reasons from state alone.
+        state_provider : callable, optional
+            Returns a dict of structured state to hand the model (battery,
+            known rooms, out-of-place sightings, time of day).
+        model : str
+            Claude model id. Defaults to the most capable Opus; set a smaller
+            model in the profile for a cost-sensitive fleet.
+        cooldown_sec : float
+            Minimum seconds between calls.
+        max_proposals : int
+            Cap on chores proposed per evaluation.
+        client : Anthropic, optional
+            Injected client (tests). When None, one is built lazily from the
+            environment on first use.
+        """
+        self._catalog = chore_catalog
+        self._context = context_provider
+        self._state = state_provider
+        self._model = model
+        self.cooldown_sec = cooldown_sec
+        self._max_proposals = max_proposals
+        self._client = client
+        self._client_ready = client is not None
+        self._disabled_reason: Optional[str] = None
+        self._allowed = {c["chore_type"] for c in chore_catalog}
+
+    def _ensure_client(self) -> bool:
+        """Build the Anthropic client on first use; disable on any problem."""
+        if self._client_ready:
+            return True
+        if self._disabled_reason is not None:
+            return False
+        try:
+            import anthropic
+        except ImportError:
+            self._disabled_reason = "anthropic SDK not installed"
+            log.warning("LLMInitiativeRule disabled — %s.", self._disabled_reason)
+            return False
+        if not (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")):
+            self._disabled_reason = "no ANTHROPIC_API_KEY in environment"
+            log.warning("LLMInitiativeRule disabled — %s.", self._disabled_reason)
+            return False
+        try:
+            self._client = anthropic.Anthropic()
+        except Exception as exc:
+            self._disabled_reason = f"client init failed: {exc}"
+            log.warning("LLMInitiativeRule disabled — %s.", self._disabled_reason)
+            return False
+        self._client_ready = True
+        return True
+
+    def _system_prompt(self) -> str:
+        """Stable instruction + chore catalogue — cached across calls."""
+        lines = [
+            "You are the initiative planner for River Kova, a household chore "
+            "robot. Given the home's current context and the robot's state, "
+            "decide which chores (if any) the robot should start now.",
+            "",
+            "Rules:",
+            "- Only propose chores from the catalogue below.",
+            "- Propose nothing if nothing is clearly worth doing — an empty "
+            "list is the right answer when the home needs no attention.",
+            "- Never propose work that a direct human command would override; "
+            "keep priorities at or below 6 (direct commands are 7).",
+            "- Prefer fewer, well-justified chores over a long list.",
+            "",
+            "Chore catalogue:",
+        ]
+        for chore in self._catalog:
+            lines.append(f"- {chore['chore_type']}: {chore.get('description', '')}")
+        return "\n".join(lines)
+
+    def _user_message(self, now: datetime) -> str:
+        """Per-call context — the volatile half of the prompt."""
+        try:
+            context = self._context() or ""
+        except Exception as exc:
+            log.warning("LLMInitiativeRule context provider error: %s", exc)
+            context = ""
+
+        state: Dict[str, Any] = {}
+        if self._state is not None:
+            try:
+                state = self._state() or {}
+            except Exception as exc:
+                log.warning("LLMInitiativeRule state provider error: %s", exc)
+
+        return (
+            f"Current local time: {now.isoformat()}\n"
+            f"Robot state: {json.dumps(state, default=str)}\n"
+            f"Household context:\n{context.strip() or '(none provided)'}"
+        )
+
+    def _output_schema(self) -> Dict[str, Any]:
+        """Structured-output schema — constrains chore_type to the catalogue."""
+        return {
+            "type": "object",
+            "properties": {
+                "proposals": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "chore_type": {"type": "string", "enum": sorted(self._allowed)},
+                            "room": {"type": ["string", "null"]},
+                            "priority": {"type": "integer"},
+                            "reason": {"type": "string"},
+                        },
+                        "required": ["chore_type", "room", "priority", "reason"],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["proposals"],
+            "additionalProperties": False,
+        }
+
+    def evaluate(self, now: datetime) -> List[TaskProposal]:
+        """Ask the model for chore proposals; return [] on any failure."""
+        if not self._allowed or not self._ensure_client():
+            return []
+
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=1024,
+                thinking={"type": "adaptive"},
+                output_config={"effort": "low", "format": {
+                    "type": "json_schema",
+                    "schema": self._output_schema(),
+                }},
+                system=[{
+                    "type": "text",
+                    "text": self._system_prompt(),
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": self._user_message(now)}],
+            )
+        except Exception as exc:
+            log.warning("LLMInitiativeRule: model call failed: %s", exc)
+            return []
+
+        if getattr(response, "stop_reason", None) == "refusal":
+            log.info("LLMInitiativeRule: model declined to propose.")
+            return []
+
+        text = next(
+            (b.text for b in response.content if getattr(b, "type", None) == "text"),
+            "",
+        )
+        try:
+            payload = json.loads(text)
+        except (ValueError, TypeError) as exc:
+            log.warning("LLMInitiativeRule: unparseable response: %s", exc)
+            return []
+
+        proposals: List[TaskProposal] = []
+        for item in payload.get("proposals", [])[: self._max_proposals]:
+            chore_type = item.get("chore_type")
+            if chore_type not in self._allowed:
+                # Schema should prevent this, but never trust it.
+                continue
+            proposals.append(TaskProposal(
+                chore_type=chore_type,
+                room=item.get("room"),
+                priority=max(1, min(6, int(item.get("priority", 4)))),
+                reason=f"LLM: {item.get('reason', 'proposed from household context')}",
+            ))
+        return proposals
 
 
 class InitiativeEngine:

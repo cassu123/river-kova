@@ -23,6 +23,10 @@ uvicorn[standard]==0.30.1
 requests==2.32.3
 urllib3==2.2.1
 
+# ── Optional: LLM initiative rule ───────────────────────────────────────────────
+# Only used when autonomy.llm.enabled is true; the rule no-ops without it.
+anthropic>=0.69.0
+
 # ── Data / Config ─────────────────────────────────────────────────────────────
 pydantic==2.7.1
 pyyaml==6.0.1
