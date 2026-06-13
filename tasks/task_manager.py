@@ -16,11 +16,13 @@ License     : Proprietary — River Song AI (riversongai.com)
 
 from __future__ import annotations
 
+import copy
 import logging
+import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from connectivity.api_client import RiverSongAPIClient
 from core.constants import TASK_RETRY_LIMIT, TaskStatus
@@ -28,6 +30,40 @@ from tasks.chore_library import ChoreLibrary
 from tasks.task_queue import TaskQueue, TaskQueueFullError
 
 log = logging.getLogger(__name__)
+
+# Voice command → chore mapping. Patterns are tried top to bottom and the
+# first match wins, so multi-word phrases ("unload the dishwasher", "get me
+# some water") must come before the generic verbs that would shadow them
+# ("get" → FETCH). All matching is on word boundaries: "getting" never
+# matches "get".
+_VOICE_CHORE_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(pattern), chore) for pattern, chore in [
+        (r"\b(?:get|bring|fetch|grab)\b.*\bwater\b", "GET_WATER"),
+        (r"\bwater\s+bottle\b", "GET_WATER"),
+        (r"\bfeed\b.*\b(?:dog|dogs|puppy|puppies)\b", "FEED_DOGS"),
+        (r"\b(?:dog|dogs)\b.*\b(?:food|dinner|breakfast)\b", "FEED_DOGS"),
+        (r"\bfeed\b", "FEED_DOGS"),
+        (r"\bunload\b.*\b(?:dishwasher|dishes)\b", "UNLOAD_DISHWASHER"),
+        (r"\b(?:dishwasher|dishes|dish)\b", "LOAD_DISHWASHER"),
+        (r"\blaundry\b|\bwasher\b.*\bdryer\b", "LAUNDRY_TRANSFER"),
+        (r"\b(?:trash|rubbish|garbage)\b", "TAKE_OUT_TRASH"),
+        (r"\bvacuum\b", "VACUUM"),
+        (r"\bmop\b", "MOP"),
+        (r"\bwipe\b", "WIPE_SURFACE"),
+        (r"\b(?:organize|organise|tidy)\b", "ORGANIZE"),
+        (r"\bexplore\b|\blearn\b.*\b(?:house|home|map|layout)\b", "EXPLORE"),
+        (r"\bclean\b", "VACUUM"),
+        (r"\bwater\b", "GET_WATER"),
+        (r"\b(?:fetch|get|bring|grab)\b", "FETCH"),
+    ]
+]
+
+_VOICE_ROOM_PATTERNS: List[Tuple[re.Pattern, str]] = [
+    (re.compile(r"\b" + name.replace("_", r"\s+") + r"\b"), name) for name in [
+        "kitchen", "living_room", "bedroom", "bathroom",
+        "hallway", "dining_room", "office", "garage",
+    ]
+]
 
 
 class TaskManager:
@@ -199,37 +235,9 @@ class TaskManager:
         command_lower = command.lower()
         log.info("TaskManager: parsing voice command: '%s'", command)
 
-        # Simple keyword mapping — order matters: more specific phrases
-        # (water, feed, dog) must match before generic verbs (get, bring).
-        chore_keywords = {
-            "water": "GET_WATER",
-            "feed": "FEED_DOGS",
-            "dog": "FEED_DOGS",
-            "vacuum": "VACUUM",
-            "mop": "MOP",
-            "clean": "VACUUM",
-            "fetch": "FETCH",
-            "get": "FETCH",
-            "bring": "FETCH",
-            "organize": "ORGANIZE",
-            "organise": "ORGANIZE",
-            "tidy": "ORGANIZE",
-            "wipe": "WIPE_SURFACE",
-            "trash": "TAKE_OUT_TRASH",
-            "rubbish": "TAKE_OUT_TRASH",
-            "dishwasher": "LOAD_DISHWASHER",
-            "dishes": "LOAD_DISHWASHER",
-            "laundry": "LAUNDRY_TRANSFER",
-        }
-
-        room_keywords = [
-            "kitchen", "living room", "bedroom", "bathroom",
-            "hallway", "dining room", "office", "garage",
-        ]
-
         chore_type = None
-        for keyword, ctype in chore_keywords.items():
-            if keyword in command_lower:
+        for pattern, ctype in _VOICE_CHORE_PATTERNS:
+            if pattern.search(command_lower):
                 chore_type = ctype
                 break
 
@@ -238,9 +246,9 @@ class TaskManager:
             return None
 
         room = None
-        for r in room_keywords:
-            if r in command_lower:
-                room = r.replace(" ", "_")
+        for pattern, name in _VOICE_ROOM_PATTERNS:
+            if pattern.search(command_lower):
+                room = name
                 break
 
         return self.submit(chore_type=chore_type, room=room, priority=7)
@@ -262,6 +270,34 @@ class TaskManager:
                 self._active_task = task
             log.info("TaskManager: dispatching task id=%s '%s'.", task["id"], task["name"])
         return task
+
+    def requeue(self, task: Dict[str, Any]) -> bool:
+        """
+        Put a dequeued-but-not-started task back in the queue.
+
+        Used when dispatch is cancelled after dequeue (e.g. a safety event
+        landed between the controller's idle check and the actual start).
+
+        Parameters
+        ----------
+        task : dict
+            The task descriptor previously returned by get_next_task().
+
+        Returns
+        -------
+        bool
+            True if the task went back in the queue.
+        """
+        with self._lock:
+            if self._active_task is task:
+                self._active_task = None
+        task["status"] = TaskStatus.QUEUED
+        try:
+            self._queue.enqueue(task)
+            return True
+        except TaskQueueFullError:
+            log.error("TaskManager.requeue: queue full — task id=%s dropped.", task.get("id"))
+            return False
 
     # ── Status reporting ──────────────────────────────────────────────────────
 
@@ -292,15 +328,25 @@ class TaskManager:
             if task and task.get("id") == task_id:
                 retry_count = task.get("retry_count", 0)
                 if retry_count < TASK_RETRY_LIMIT:
-                    task["retry_count"] = retry_count + 1
-                    task["status"] = TaskStatus.QUEUED
-                    log.warning(
-                        "Task id=%s failed (attempt %d/%d) — re-queuing. Reason: %s",
-                        task_id, retry_count + 1, TASK_RETRY_LIMIT, reason,
-                    )
-                    self._queue.enqueue(task)
-                    self._active_task = None
-                    return
+                    # Re-queue a fresh copy: the executor still holds a
+                    # reference to the original dict, so sharing it would
+                    # let late mutations corrupt the queued attempt.
+                    retry = copy.deepcopy(task)
+                    retry["retry_count"] = retry_count + 1
+                    retry["status"] = TaskStatus.QUEUED
+                    try:
+                        self._queue.enqueue(retry)
+                    except TaskQueueFullError:
+                        log.error(
+                            "Task id=%s retry dropped — queue full.", task_id,
+                        )
+                    else:
+                        log.warning(
+                            "Task id=%s failed (attempt %d/%d) — re-queuing. Reason: %s",
+                            task_id, retry_count + 1, TASK_RETRY_LIMIT, reason,
+                        )
+                        self._active_task = None
+                        return
 
         self._update_status(task_id, TaskStatus.FAILED, reason)
 

@@ -22,6 +22,7 @@ License     : Proprietary — River Song AI (riversongai.com)
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -90,16 +91,48 @@ class ScheduledRoutineRule(InitiativeRule):
     name = "scheduled_routine"
     cooldown_sec = 0.0             # Per-routine dedup handles repeats
 
-    def __init__(self, routines: List[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        routines: List[Dict[str, Any]],
+        state_path: Optional[str] = None,
+    ) -> None:
         """
         Parameters
         ----------
         routines : list of dict
             Routine entries from the unit profile.
+        state_path : str, optional
+            JSON file for persisting last-fired dates. Without it, a reboot
+            forgets what already ran today and routines can fire twice.
         """
         self._routines = routines
-        self._last_fired_date: Dict[int, str] = {}    # routine index → ISO date
+        self._state_path = state_path
+        self._last_fired_date: Dict[int, str] = self._load_state()
         log.info("ScheduledRoutineRule loaded %d routine(s).", len(routines))
+
+    def _load_state(self) -> Dict[int, str]:
+        """Restore last-fired dates from disk; empty on any problem."""
+        if not self._state_path:
+            return {}
+        try:
+            with open(self._state_path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            return {int(index): date for index, date in raw.items()}
+        except FileNotFoundError:
+            return {}
+        except Exception as exc:
+            log.warning("ScheduledRoutineRule: state load failed (%s) — starting fresh.", exc)
+            return {}
+
+    def _save_state(self) -> None:
+        """Persist last-fired dates; failure only costs reboot dedup."""
+        if not self._state_path:
+            return
+        try:
+            with open(self._state_path, "w", encoding="utf-8") as fh:
+                json.dump({str(k): v for k, v in self._last_fired_date.items()}, fh)
+        except Exception as exc:
+            log.warning("ScheduledRoutineRule: state save failed: %s", exc)
 
     def evaluate(self, now: datetime) -> List[TaskProposal]:
         """Propose any routine whose scheduled time window is open today."""
@@ -124,6 +157,7 @@ class ScheduledRoutineRule(InitiativeRule):
             now_min = now.hour * 60 + now.minute
             if scheduled_min <= now_min <= scheduled_min + _ROUTINE_GRACE_MIN:
                 self._last_fired_date[index] = today
+                self._save_state()
                 proposals.append(TaskProposal(
                     chore_type=routine.get("chore", "VACUUM"),
                     room=routine.get("room"),

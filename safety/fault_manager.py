@@ -144,7 +144,7 @@ class FaultManager:
                     self._history.pop(0)
                 log.error("New fault [%s]: %s", fault_code, message)
 
-        if self._on_fault and fault_code not in self._active or True:
+        if self._on_fault:
             # Always fire callback so the main controller can react
             try:
                 self._on_fault(fault_code, message)

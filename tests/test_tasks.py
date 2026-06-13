@@ -326,3 +326,58 @@ class TestTaskManager:
         result = manager.cancel_task(task_id)
         assert result is True
         assert manager.queue_size == 0
+
+    def test_mark_failed_requeues_a_fresh_copy(self):
+        """The retry must be a copy — the executor still holds the original."""
+        manager, _ = self._make_manager()
+        manager.submit(ChoreType.VACUUM)
+        task = manager.get_next_task()
+        manager.mark_failed(task["id"], reason="test failure")
+        retry = manager._queue.peek()
+        assert retry is not task
+        assert retry["retry_count"] == 1
+        assert retry["status"] == TaskStatus.QUEUED
+        # Late mutation of the original must not corrupt the queued retry
+        task["status"] = TaskStatus.ABORTED
+        assert retry["status"] == TaskStatus.QUEUED
+
+    def test_requeue_puts_dispatched_task_back(self):
+        """requeue() should return a dequeued task to the queue unchanged."""
+        manager, _ = self._make_manager()
+        manager.submit(ChoreType.VACUUM)
+        task = manager.get_next_task()
+        assert manager.queue_size == 0
+        assert manager.requeue(task) is True
+        assert manager.queue_size == 1
+        assert manager.active_task is None
+
+    def test_submit_from_voice_get_water(self):
+        """'get me some water' must route to GET_WATER, not generic FETCH."""
+        manager, _ = self._make_manager()
+        manager.submit_from_voice("River, have Kova get me some water")
+        assert manager._queue.peek()["chore_type"] == "GET_WATER"
+
+    def test_submit_from_voice_unload_dishwasher(self):
+        """'unload the dishwasher' must not match LOAD_DISHWASHER."""
+        manager, _ = self._make_manager()
+        manager.submit_from_voice("have kova unload the dishwasher")
+        assert manager._queue.peek()["chore_type"] == "UNLOAD_DISHWASHER"
+
+    def test_submit_from_voice_respects_word_boundaries(self):
+        """Substrings inside other words ('forget' ⊃ 'get') must not match."""
+        manager, _ = self._make_manager()
+        assert manager.submit_from_voice("River, forget about it") is None
+
+    def test_submit_from_voice_dining_room(self):
+        """Multi-word room names should parse with flexible whitespace."""
+        manager, _ = self._make_manager()
+        manager.submit_from_voice("have kova vacuum the dining room")
+        task = manager._queue.peek()
+        assert task["chore_type"] == "VACUUM"
+        assert task["room"] == "dining_room"
+
+    def test_submit_from_voice_trash(self):
+        """'take out the trash' should route to TAKE_OUT_TRASH."""
+        manager, _ = self._make_manager()
+        manager.submit_from_voice("hey kova take out the trash")
+        assert manager._queue.peek()["chore_type"] == "TAKE_OUT_TRASH"

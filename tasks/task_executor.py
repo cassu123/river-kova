@@ -152,6 +152,12 @@ class TaskExecutor:
                         "TaskExecutor: safety check failed at step %d — pausing.", step_index
                     )
                     self._wait_for_safe(timeout=30.0)
+                    if self._abort_flag:
+                        # An abort (e-stop, battery critical, shutdown) landed
+                        # while we were paused — don't resume.
+                        log.warning("TaskExecutor: task id=%s aborted during safety pause.", task_id)
+                        self._task_manager.mark_aborted(task_id, "Abort requested.")
+                        return False
                     if not self._safety_check():
                         self._task_manager.mark_aborted(task_id, "Safety check failed.")
                         return False

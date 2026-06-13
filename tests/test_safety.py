@@ -249,6 +249,21 @@ class TestFaultManager:
         assert "fault_code" in history[0]
         assert "message" in history[0]
 
+    def test_report_without_callback_does_not_error(self, caplog):
+        """report() with no on_fault registered must not try to call None."""
+        fm = FaultManager(robot_id="test-unit")
+        with caplog.at_level("ERROR"):
+            fm.report("Test", fault_code=FaultCode.UNKNOWN)
+        assert not any("callback error" in r.message for r in caplog.records)
+
+    def test_callback_fires_on_repeat_fault(self):
+        """The controller must hear about every report, repeats included."""
+        received = []
+        fm = FaultManager(robot_id="test-unit", on_fault=lambda c, m: received.append(c))
+        fm.report("First", fault_code=FaultCode.MOTOR_FAULT)
+        fm.report("Second", fault_code=FaultCode.MOTOR_FAULT)
+        assert len(received) == 2
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CollisionAvoidance Tests

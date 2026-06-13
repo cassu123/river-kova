@@ -78,6 +78,27 @@ class TestScheduledRoutineRule:
         ])
         assert rule.evaluate(MONDAY_905) == []
 
+    def test_fired_state_survives_restart(self, tmp_path):
+        """A rebuilt rule (reboot) must not fire the same routine twice in a day."""
+        state_path = str(tmp_path / "routine_state.json")
+        routines = [{"chore": "FEED_DOGS", "time": "09:00", "days": ["mon"]}]
+
+        rule = ScheduledRoutineRule(routines, state_path=state_path)
+        assert len(rule.evaluate(MONDAY_905)) == 1
+
+        rebooted = ScheduledRoutineRule(routines, state_path=state_path)
+        assert rebooted.evaluate(MONDAY_905) == []
+
+    def test_corrupt_state_file_starts_fresh(self, tmp_path):
+        """An unreadable state file must not prevent routines from firing."""
+        state_path = tmp_path / "routine_state.json"
+        state_path.write_text("{not json")
+        rule = ScheduledRoutineRule(
+            [{"chore": "VACUUM", "time": "09:00", "days": ["mon"]}],
+            state_path=str(state_path),
+        )
+        assert len(rule.evaluate(MONDAY_905)) == 1
+
 
 class TestTidyUpRule:
     def test_proposes_organize_when_items_seen(self):

@@ -75,6 +75,10 @@ class ConnectivityConfig:
     telemetry_push_interval_sec: float = 5.0
     stream_port: int = 8080
     fastapi_port: int = 8000
+    # Bind address for the local control API. The API is unauthenticated,
+    # so anyone who can reach the socket can drive the robot — set
+    # "127.0.0.1" to restrict control to the unit itself.
+    api_host: str = "0.0.0.0"
 
 
 @dataclass
@@ -314,6 +318,7 @@ class Config:
             telemetry_push_interval_sec=float(c.get("telemetry_push_interval_sec", 5.0)),
             stream_port=int(c.get("stream_port", 8080)),
             fastapi_port=int(c.get("fastapi_port", 8000)),
+            api_host=str(c.get("api_host", "0.0.0.0")),
         )
 
     def _build_navigation(self) -> NavigationConfig:

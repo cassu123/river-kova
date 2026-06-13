@@ -53,6 +53,7 @@ except ImportError:
 # ── River Kova core ───────────────────────────────────────────────────────────
 from core.config import config
 from core.constants import (
+    BATTERY_FULL,
     MAIN_NODE_NAME,
     RobotState,
     SafetyLevel,
@@ -157,7 +158,11 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             super().__init__(MAIN_NODE_NAME)
 
         self.robot_id: str = config.robot_id
-        self.state: RobotState = RobotState.BOOTING
+        # State is read and written from the control loop, the task executor
+        # worker, safety callbacks, and the local API thread — all access
+        # goes through the locked property below.
+        self._state_lock = threading.Lock()
+        self._state: RobotState = RobotState.BOOTING
         self.safety_level: SafetyLevel = SafetyLevel.NOMINAL
         self._shutdown_event = threading.Event()
 
@@ -215,6 +220,33 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         self._executor_thread: Optional[threading.Thread] = None
 
         self._boot()
+
+    # ── State machine ─────────────────────────────────────────────────────────
+
+    @property
+    def state(self) -> RobotState:
+        """Current operational state (thread-safe)."""
+        with self._state_lock:
+            return self._state
+
+    @state.setter
+    def state(self, new_state: RobotState) -> None:
+        with self._state_lock:
+            self._state = new_state
+
+    def _transition(self, expected: RobotState, new_state: RobotState) -> bool:
+        """
+        Atomically move from `expected` to `new_state`.
+
+        Returns False (without changing anything) if another thread moved
+        the state first — e.g. a safety callback set ESTOP while a task
+        was finishing. The caller must not assume the transition happened.
+        """
+        with self._state_lock:
+            if self._state != expected:
+                return False
+            self._state = new_state
+            return True
 
     # ── Boot sequence ─────────────────────────────────────────────────────────
 
@@ -412,6 +444,8 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         if self.semantic_map.load(map_path):
             log.info("  ✓ SemanticMap restored (%d room(s) known)",
                      len(self.semantic_map.known_rooms()))
+        elif Path(map_path).exists():
+            log.warning("  ✗ SemanticMap file unreadable — relearning the home from scratch")
         else:
             log.info("  ✓ SemanticMap ready (home not yet learned)")
         self._semantic_map_path = map_path
@@ -424,6 +458,8 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         if self.occupancy_map.load(occ_path):
             log.info("  ✓ OccupancyMap restored (%.1f m² mapped)",
                      self.occupancy_map.explored_area_m2())
+        elif Path(occ_path).exists():
+            log.warning("  ✗ OccupancyMap file unreadable — remapping structure from scratch")
         else:
             log.info("  ✓ OccupancyMap ready (structure not yet mapped)")
         self._occupancy_map_path = occ_path
@@ -528,7 +564,12 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         )
 
         if config.autonomy.routines:
-            self.initiative_engine.add_rule(ScheduledRoutineRule(config.autonomy.routines))
+            # Persist last-fired dates so a reboot after 07:30 doesn't feed
+            # the dogs a second time.
+            self.initiative_engine.add_rule(ScheduledRoutineRule(
+                config.autonomy.routines,
+                state_path=str(Path(config.telemetry.log_dir) / "routine_state.json"),
+            ))
 
         # Out-of-place observations: SimWorld in simulation; on a real body
         # this provider will be backed by the vision pipeline.
@@ -552,7 +593,11 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
     def _init_local_api(self) -> None:
         """Start the self-hosted control API."""
         log.info("[BOOT 9/9] Starting local control API...")
-        self.local_api = LocalControlServer(core=self, port=config.connectivity.fastapi_port)
+        self.local_api = LocalControlServer(
+            core=self,
+            host=config.connectivity.api_host,
+            port=config.connectivity.fastapi_port,
+        )
         if self.local_api.start():
             log.info("  ✓ Local control API on port %d", config.connectivity.fastapi_port)
         else:
@@ -606,6 +651,17 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         # 2. Battery check
         if self.battery_monitor:
             self.battery_monitor.poll()
+
+            # Charged back up at the dock? The unit is available again.
+            if (
+                self.state == RobotState.CHARGING
+                and self.battery_monitor.level >= BATTERY_FULL
+                and self._transition(RobotState.CHARGING, RobotState.IDLE)
+            ):
+                log.info(
+                    "Battery recharged to %.1f%% — unit available again.",
+                    self.battery_monitor.level,
+                )
 
         # 2b. Passive room recognition — wherever the robot is, whatever it
         # is doing, what it currently sees feeds the learned home map.
@@ -681,8 +737,17 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         task : dict
             Task descriptor from the task manager.
         """
+        if not self._transition(RobotState.IDLE, RobotState.EXECUTING_TASK):
+            # A safety callback changed state between the tick's gate check
+            # and here — put the task back rather than run it unsafely.
+            log.warning(
+                "Dispatch of '%s' cancelled — state is now %s; re-queuing.",
+                task.get("name", "unknown"), self.state.value,
+            )
+            self.task_manager.requeue(task)
+            return
+
         log.info("Dispatching task: %s", task.get("name", "unknown"))
-        self.state = RobotState.EXECUTING_TASK
         self._executor_thread = threading.Thread(
             target=self._run_task,
             args=(task,),
@@ -700,8 +765,9 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             if self.fault_manager:
                 self.fault_manager.report(f"Task failed: {exc}")
         finally:
-            if self.state == RobotState.EXECUTING_TASK:
-                self.state = RobotState.IDLE
+            # Atomic: only go back to IDLE if no safety callback moved the
+            # state (ESTOP/FAULT/RETURNING_TO_BASE) while the task ran.
+            self._transition(RobotState.EXECUTING_TASK, RobotState.IDLE)
 
     # ── Safety helpers ────────────────────────────────────────────────────────
 
@@ -828,12 +894,36 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
         level : float
             Current battery percentage.
         """
+        if self.state in (RobotState.RETURNING_TO_BASE, RobotState.CHARGING):
+            return
         log.error("Battery CRITICAL: %.1f%% — returning to base immediately.", level)
         self.state = RobotState.RETURNING_TO_BASE
         if self.task_executor:
             self.task_executor.abort_current()
         if self.return_to_base:
-            self.return_to_base.execute()
+            # Navigation takes many seconds and this callback fires from the
+            # control loop / battery poll thread — it must not block them
+            # (a stalled control loop trips the watchdog).
+            threading.Thread(
+                target=self._return_to_base_worker,
+                name="kova-return-to-base",
+                daemon=True,
+            ).start()
+
+    def _return_to_base_worker(self) -> None:
+        """Worker-thread body for the critical-battery return-to-base run."""
+        try:
+            docked = self.return_to_base.execute()
+        except Exception as exc:
+            log.error("Return-to-base error: %s", exc, exc_info=True)
+            docked = False
+
+        if docked:
+            self._transition(RobotState.RETURNING_TO_BASE, RobotState.CHARGING)
+            log.info("Docked on critical battery — charging.")
+        else:
+            if self.fault_manager:
+                self.fault_manager.report("Return to base failed on critical battery")
 
     # ── Emergency halt ────────────────────────────────────────────────────────
 
@@ -911,9 +1001,13 @@ class KovaCore(Node if ROS2_AVAILABLE else object):
             except Exception:
                 pass
 
-        # Abort any in-flight chore, then stop motion
+        # Abort any in-flight chore and give its worker thread a moment to
+        # reach the abort point — don't kill it mid-motion with hardware in
+        # an unknown state.
         if self.task_executor:
             self.task_executor.abort_current()
+        if self._executor_thread and self._executor_thread.is_alive():
+            self._executor_thread.join(timeout=5.0)
         self._emergency_halt(reason="Graceful shutdown")
 
         # Persist the learned home maps so recognition and structure
